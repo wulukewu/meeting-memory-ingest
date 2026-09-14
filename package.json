@@ -11,9 +11,6 @@
     "test": "vitest run",
     "youtube:auth": "node scripts/youtube-oauth.mjs"
   },
-  "dependencies": {
-    "@cloudflare/puppeteer": "1.1.0"
-  },
   "devDependencies": {
     "typescript": "^5.9.0",
     "vitest": "^4.0.0",
