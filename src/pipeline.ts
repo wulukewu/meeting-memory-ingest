@@ -1,6 +1,25 @@
-import type { Env, RunResult, TranscriptResult, TriggerKind, VideoRecord } from "./types";
-import { claimVideo, completeVideo, failVideo, loadManifest, upsertTextFile } from "./github";
-import { summarizeMeeting, transcribeAudioUpload, transcribeAudioUrl } from "./groq";
+import type {
+  Env,
+  ManifestEntry,
+  RunResult,
+  StoredTranscriptChunk,
+  StoredTranscriptWork,
+  TranscriptResult,
+  TriggerKind,
+  VideoRecord,
+} from "./types";
+import { mergeTranscriptChunks, normalizedCompletedChunks } from "./chunks";
+import {
+  completeVideo,
+  deferVideo,
+  deleteTextFile,
+  failVideo,
+  getTextFile,
+  loadManifest,
+  recordChunkCompleted,
+  upsertTextFile,
+} from "./github";
+import { GroqRateLimitError, summarizeMeeting, transcribeAudioUpload, transcribeAudioUrl } from "./groq";
 import { buildTranscriptPath, renderMeetingMarkdown } from "./markdown";
 import { dispatchYouTubeResolver } from "./resolver-dispatch";
 import { errorMessage, parsePositiveInt } from "./util";
@@ -15,12 +34,48 @@ function validateResolvedAudioUrl(rawUrl: string): string {
   return url.toString();
 }
 
-async function dispatchClaimedVideo(env: Env, video: VideoRecord): Promise<void> {
+function workPath(env: Env, videoId: string): string {
+  return `${env.TRANSCRIPT_ROOT.replace(/\/$/, "")}/_work/${videoId}.json`;
+}
+
+async function loadWork(env: Env, videoId: string): Promise<StoredTranscriptWork> {
+  const file = await getTextFile(env, workPath(env, videoId));
+  if (!file) return { version: 1, videoId, chunks: {} };
+  const parsed = JSON.parse(file.text) as StoredTranscriptWork;
+  if (parsed.version !== 1 || parsed.videoId !== videoId || !parsed.chunks || typeof parsed.chunks !== "object") {
+    throw new Error(`invalid transcript work file for ${videoId}`);
+  }
+  return parsed;
+}
+
+async function storeChunk(
+  env: Env,
+  videoId: string,
+  chunkIndex: number,
+  offsetSeconds: number,
+  transcript: TranscriptResult,
+): Promise<void> {
+  const work = await loadWork(env, videoId);
+  work.chunks[String(chunkIndex)] = {
+    version: 1,
+    videoId,
+    chunkIndex,
+    offsetSeconds,
+    transcript,
+  };
+  await upsertTextFile(
+    env,
+    workPath(env, videoId),
+    `${JSON.stringify(work, null, 2)}\n`,
+    `chore(meetings): store transcript chunk ${videoId}#${chunkIndex}`,
+  );
+}
+
+async function cleanupWork(env: Env, videoId: string): Promise<void> {
   try {
-    await dispatchYouTubeResolver(env, video.id);
+    await deleteTextFile(env, workPath(env, videoId), `chore(meetings): clean transcript work ${videoId}`);
   } catch (error) {
-    await failVideo(env, video, error);
-    throw error;
+    console.error(`Could not clean transcript work file for ${videoId}`, error);
   }
 }
 
@@ -33,11 +88,35 @@ async function persistTranscript(env: Env, video: VideoRecord, transcript: Trans
   return path;
 }
 
+async function finalizeFromWork(env: Env, video: VideoRecord, entry: ManifestEntry): Promise<string> {
+  const totalChunks = entry.totalChunks || 1;
+  const work = await loadWork(env, video.id);
+  const chunks: StoredTranscriptChunk[] = [];
+  for (let index = 0; index < totalChunks; index += 1) {
+    const chunk = work.chunks[String(index)];
+    if (!chunk) throw new Error(`transcript chunk ${index}/${totalChunks} is missing for ${video.id}`);
+    chunks.push(chunk);
+  }
+  const transcript = mergeTranscriptChunks(chunks, entry.durationSeconds || video.durationSeconds);
+  const path = await persistTranscript(env, video, transcript);
+  await cleanupWork(env, video.id);
+  return path;
+}
+
 async function processResolvedVideo(env: Env, video: VideoRecord, audioUrl: string): Promise<string> {
   try {
     const safeAudioUrl = validateResolvedAudioUrl(audioUrl);
     const transcript = await transcribeAudioUrl(env, safeAudioUrl, video);
     return await persistTranscript(env, video, transcript);
+  } catch (error) {
+    await failVideo(env, video, error);
+    throw error;
+  }
+}
+
+async function dispatchClaimedVideo(env: Env, video: VideoRecord, entry: ManifestEntry): Promise<void> {
+  try {
+    await dispatchYouTubeResolver(env, video.id, entry);
   } catch (error) {
     await failVideo(env, video, error);
     throw error;
@@ -64,15 +143,15 @@ export async function runPlaylist(env: Env, trigger: TriggerKind = "cron"): Prom
       continue;
     }
 
-    const claim = await claimVideo(env, video);
-    if (!claim.claimed) {
+    const claim = await claimVideoWithProgress(env, video);
+    if (!claim.entry) {
       result.skipped.push({ videoId: video.id, reason: claim.reason || "not claimable" });
       continue;
     }
 
     result.claimed += 1;
     try {
-      await dispatchClaimedVideo(env, video);
+      await dispatchClaimedVideo(env, video, claim.entry);
       result.dispatched.push(video.id);
     } catch (error) {
       result.failed.push({ videoId: video.id, error: errorMessage(error) });
@@ -80,6 +159,12 @@ export async function runPlaylist(env: Env, trigger: TriggerKind = "cron"): Prom
   }
 
   return result;
+}
+
+async function claimVideoWithProgress(env: Env, video: VideoRecord): Promise<{ entry?: ManifestEntry; reason?: string }> {
+  const { claimVideo } = await import("./github");
+  const claim = await claimVideo(env, video);
+  return { entry: claim.claimed ? claim.entry : undefined, reason: claim.reason };
 }
 
 export async function runSingleVideo(env: Env, videoId: string): Promise<RunResult> {
@@ -94,15 +179,15 @@ export async function runSingleVideo(env: Env, videoId: string): Promise<RunResu
   }
 
   result.eligible = 1;
-  const claim = await claimVideo(env, video);
-  if (!claim.claimed) {
+  const claim = await claimVideoWithProgress(env, video);
+  if (!claim.entry) {
     result.skipped.push({ videoId, reason: claim.reason || "not claimable" });
     return result;
   }
 
   result.claimed = 1;
   try {
-    await dispatchClaimedVideo(env, video);
+    await dispatchClaimedVideo(env, video, claim.entry);
     result.dispatched.push(video.id);
   } catch (error) {
     result.failed.push({ videoId, error: errorMessage(error) });
@@ -110,37 +195,110 @@ export async function runSingleVideo(env: Env, videoId: string): Promise<RunResu
   return result;
 }
 
-async function getClaimedVideo(env: Env, videoId: string): Promise<VideoRecord> {
+async function claimedVideo(env: Env, videoId: string): Promise<{ video: VideoRecord; entry: ManifestEntry }> {
   if (!/^[A-Za-z0-9_-]{6,20}$/.test(videoId)) throw new Error("invalid video id");
-
   const { manifest } = await loadManifest(env);
   const entry = manifest.videos[videoId];
-  if (entry?.status === "completed") {
-    throw new Error(`video ${videoId} is already completed`);
-  }
-  if (!entry || entry.status !== "processing") {
-    throw new Error(`video ${videoId} is not currently claimed for processing`);
-  }
-
+  if (!entry || entry.status !== "processing") throw new Error(`video ${videoId} is not currently claimed for processing`);
   const accessToken = await getYouTubeAccessToken(env);
-  return getVideo(env, accessToken, videoId);
+  return { video: await getVideo(env, accessToken, videoId), entry };
+}
+
+export type ChunkTranscriptionResult = {
+  videoId: string;
+  status: "chunk_completed" | "completed" | "deferred" | "failed";
+  chunkIndex?: number;
+  nextChunkIndex?: number;
+  completedChunks?: number;
+  totalChunks?: number;
+  retryAfterAt?: string;
+  path?: string;
+};
+
+async function finalizeOrDefer(
+  env: Env,
+  video: VideoRecord,
+  entry: ManifestEntry,
+  chunkIndex: number,
+): Promise<ChunkTranscriptionResult> {
+  try {
+    const path = await finalizeFromWork(env, video, entry);
+    return { videoId: video.id, status: "completed", chunkIndex, path };
+  } catch (error) {
+    if (error instanceof GroqRateLimitError) {
+      await deferVideo(env, video, error.retryAfterSeconds, error);
+      const retryAfterAt = new Date(Date.now() + error.retryAfterSeconds * 1000).toISOString();
+      return { videoId: video.id, status: "deferred", chunkIndex, retryAfterAt };
+    }
+    await failVideo(env, video, error);
+    return { videoId: video.id, status: "failed", chunkIndex };
+  }
 }
 
 export async function handleResolverTranscription(
   env: Env,
   videoId: string,
+  chunkIndex: number,
   body: BodyInit,
   contentType: string,
-): Promise<{ videoId: string; status: "completed" | "failed"; path?: string }> {
-  const video = await getClaimedVideo(env, videoId);
-  try {
-    const transcript = await transcribeAudioUpload(env, body, contentType);
-    const path = await persistTranscript(env, video, transcript);
-    return { videoId, status: "completed", path };
-  } catch (error) {
-    await failVideo(env, video, error);
-    return { videoId, status: "failed" };
+): Promise<ChunkTranscriptionResult> {
+  const { manifest } = await loadManifest(env);
+  const manifestEntry = manifest.videos[videoId];
+  if (manifestEntry?.status === "completed") {
+    return { videoId, status: "completed", chunkIndex, path: manifestEntry.path };
   }
+
+  const { video, entry } = await claimedVideo(env, videoId);
+  const totalChunks = entry.totalChunks || 1;
+  const chunkSeconds = entry.chunkSeconds || parsePositiveInt(env.TRANSCRIPTION_CHUNK_SECONDS, 2700);
+  if (!Number.isInteger(chunkIndex) || chunkIndex < 0 || chunkIndex >= totalChunks) {
+    throw new Error(`invalid chunk index ${chunkIndex}/${totalChunks}`);
+  }
+
+  const work = await loadWork(env, videoId);
+  const cached = work.chunks[String(chunkIndex)];
+  let updatedEntry = entry;
+
+  if (cached) {
+    if (!(entry.completedChunks || []).includes(chunkIndex)) {
+      updatedEntry = await recordChunkCompleted(env, videoId, chunkIndex);
+    }
+  } else {
+    const expected = entry.nextChunkIndex || 0;
+    if (chunkIndex !== expected) throw new Error(`unexpected chunk ${chunkIndex}; next expected chunk is ${expected}`);
+
+    try {
+      const transcript = await transcribeAudioUpload(env, body, contentType);
+      await storeChunk(env, videoId, chunkIndex, chunkIndex * chunkSeconds, transcript);
+      updatedEntry = await recordChunkCompleted(env, videoId, chunkIndex);
+    } catch (error) {
+      if (error instanceof GroqRateLimitError) {
+        await deferVideo(env, video, error.retryAfterSeconds, error);
+        return {
+          videoId,
+          status: "deferred",
+          chunkIndex,
+          retryAfterAt: new Date(Date.now() + error.retryAfterSeconds * 1000).toISOString(),
+        };
+      }
+      await failVideo(env, video, error);
+      return { videoId, status: "failed", chunkIndex };
+    }
+  }
+
+  const completedChunks = normalizedCompletedChunks(totalChunks, updatedEntry.completedChunks);
+  if (completedChunks.length >= totalChunks) {
+    return finalizeOrDefer(env, video, { ...updatedEntry, completedChunks }, chunkIndex);
+  }
+
+  return {
+    videoId,
+    status: "chunk_completed",
+    chunkIndex,
+    nextChunkIndex: updatedEntry.nextChunkIndex,
+    completedChunks: completedChunks.length,
+    totalChunks,
+  };
 }
 
 export async function handleResolverCallback(

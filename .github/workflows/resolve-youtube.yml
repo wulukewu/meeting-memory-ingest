@@ -15,6 +15,14 @@ on:
         description: Groq transcription model selected by the Worker
         required: true
         type: string
+      start_chunk_index:
+        description: First transcript chunk that still needs processing
+        required: true
+        type: string
+      chunk_seconds:
+        description: Duration of each transcription chunk in seconds
+        required: true
+        type: string
 
 permissions:
   contents: read
@@ -22,7 +30,7 @@ permissions:
 jobs:
   resolve:
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 45
     steps:
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -35,11 +43,13 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y wireguard-tools ffmpeg
 
-      - name: Resolve, download, compress, and transcribe
+      - name: Resolve, download, split, and transcribe
         env:
           VIDEO_ID: ${{ inputs.video_id }}
           CALLBACK_URL: ${{ inputs.callback_url }}
           TRANSCRIPTION_MODEL: ${{ inputs.transcription_model }}
+          START_CHUNK_INDEX: ${{ inputs.start_chunk_index }}
+          CHUNK_SECONDS: ${{ inputs.chunk_seconds }}
           WORKER_ADMIN_TOKEN: ${{ secrets.WORKER_ADMIN_TOKEN }}
           WG_CONF: ${{ secrets.WG_CONF }}
         shell: bash
@@ -52,6 +62,14 @@ jobs:
           fi
           if [[ ! "$TRANSCRIPTION_MODEL" =~ ^[A-Za-z0-9._/-]+$ ]]; then
             echo "Invalid transcription model" >&2
+            exit 2
+          fi
+          if [[ ! "$START_CHUNK_INDEX" =~ ^[0-9]+$ ]]; then
+            echo "Invalid start chunk index" >&2
+            exit 2
+          fi
+          if [[ ! "$CHUNK_SECONDS" =~ ^[0-9]+$ ]] || (( CHUNK_SECONDS < 300 || CHUNK_SECONDS > 3600 )); then
+            echo "Invalid chunk duration" >&2
             exit 2
           fi
           if [[ -z "${WORKER_ADMIN_TOKEN:-}" ]]; then
@@ -70,9 +88,8 @@ jobs:
           ERR_FILE="$(mktemp)"
           SOURCE_PREFIX="/tmp/meeting-source"
           SOURCE_FILE=""
-          UPLOAD_FILE="/tmp/meeting-upload.ogg"
           PAYLOAD=""
-          UPLOAD_READY=0
+          CHUNKS_READY=0
           WG_UP=0
 
           cleanup_wg() {
@@ -161,60 +178,121 @@ jobs:
             if [[ -z "$PAYLOAD" && -n "$SOURCE_FILE" && -s "$SOURCE_FILE" ]]; then
               SOURCE_BYTES="$(stat -c%s "$SOURCE_FILE")"
               echo "Downloaded source audio through WireGuard (${SOURCE_BYTES} bytes)."
-              echo "Compressing meeting audio for Groq direct upload."
+              echo "Splitting meeting audio into ${CHUNK_SECONDS}s transcription chunks."
 
+              rm -f /tmp/meeting-chunk-*.ogg
               set +e
               ffmpeg -nostdin -hide_banner -loglevel error -y \
                 -i "$SOURCE_FILE" -vn -map 0:a:0 -ac 1 -ar 16000 \
-                -c:a libopus -b:a 24k -application voip "$UPLOAD_FILE"
+                -c:a libopus -b:a 24k -application voip \
+                -f segment -segment_time "$CHUNK_SECONDS" -reset_timestamps 1 \
+                /tmp/meeting-chunk-%04d.ogg
               FFMPEG_RC=$?
               set -e
 
-              if [[ $FFMPEG_RC -ne 0 || ! -s "$UPLOAD_FILE" ]]; then
+              mapfile -t CHUNK_FILES < <(find /tmp -maxdepth 1 -type f -name 'meeting-chunk-*.ogg' -size +0c | sort)
+              if [[ $FFMPEG_RC -ne 0 || ${#CHUNK_FILES[@]} -eq 0 ]]; then
                 PAYLOAD="$(jq -n \
                   --arg videoId "$VIDEO_ID" \
-                  --arg error "ffmpeg could not prepare the meeting audio for transcription" \
+                  --arg error "ffmpeg could not split the meeting audio for transcription" \
+                  '{videoId:$videoId,error:$error}')"
+              elif (( START_CHUNK_INDEX >= ${#CHUNK_FILES[@]} )); then
+                PAYLOAD="$(jq -n \
+                  --arg videoId "$VIDEO_ID" \
+                  --arg error "requested chunk ${START_CHUNK_INDEX}, but resolver produced only ${#CHUNK_FILES[@]} chunks" \
                   '{videoId:$videoId,error:$error}')"
               else
-                UPLOAD_BYTES="$(stat -c%s "$UPLOAD_FILE")"
-                if (( UPLOAD_BYTES > 24000000 )); then
-                  PAYLOAD="$(jq -n \
-                    --arg videoId "$VIDEO_ID" \
-                    --arg error "compressed meeting audio is ${UPLOAD_BYTES} bytes, above the 24 MB upload safety limit" \
-                    '{videoId:$videoId,error:$error}')"
-                else
-                  echo "Prepared compressed audio for direct Groq upload (${UPLOAD_BYTES} bytes)."
-                  UPLOAD_READY=1
+                for chunk_file in "${CHUNK_FILES[@]}"; do
+                  CHUNK_BYTES="$(stat -c%s "$chunk_file")"
+                  if (( CHUNK_BYTES > 24000000 )); then
+                    PAYLOAD="$(jq -n \
+                      --arg videoId "$VIDEO_ID" \
+                      --arg error "compressed transcript chunk exceeds the 24 MB upload safety limit (${CHUNK_BYTES} bytes)" \
+                      '{videoId:$videoId,error:$error}')"
+                    break
+                  fi
+                done
+                if [[ -z "$PAYLOAD" ]]; then
+                  echo "Prepared ${#CHUNK_FILES[@]} compressed transcription chunks."
+                  CHUNKS_READY=1
                 fi
               fi
             fi
           fi
 
           # YouTube access is finished. Restore the runner's normal egress before
-          # uploading the small compressed file to the Worker/Groq pipeline.
+          # uploading compressed chunks to the Worker/Groq pipeline.
           cleanup_wg
           trap - EXIT
 
-          if [[ "$UPLOAD_READY" == "1" ]]; then
+          if [[ "$CHUNKS_READY" == "1" ]]; then
             TRANSCRIBE_URL="${CALLBACK_URL%/resolver/callback}/resolver/transcribe"
-            HTTP_CODE="$(curl -sS --max-time 1200 \
-              -o /tmp/callback-response.json \
-              -w '%{http_code}' \
-              -X POST \
-              -H "Authorization: Bearer ${WORKER_ADMIN_TOKEN}" \
-              -H "X-Video-ID: ${VIDEO_ID}" \
-              -F "file=@${UPLOAD_FILE};type=audio/ogg" \
-              -F "model=${TRANSCRIPTION_MODEL}" \
-              -F 'response_format=verbose_json' \
-              -F 'timestamp_granularities[]=segment' \
-              -F 'language=zh' \
-              -F 'temperature=0' \
-              "$TRANSCRIBE_URL")"
+            FINAL_STATUS=""
+
+            for chunk_file in "${CHUNK_FILES[@]}"; do
+              chunk_name="$(basename "$chunk_file")"
+              chunk_number="${chunk_name#meeting-chunk-}"
+              chunk_number="${chunk_number%.ogg}"
+              chunk_index=$((10#$chunk_number))
+              if (( chunk_index < START_CHUNK_INDEX )); then
+                continue
+              fi
+
+              CHUNK_BYTES="$(stat -c%s "$chunk_file")"
+              echo "Uploading transcript chunk ${chunk_index}/${#CHUNK_FILES[@]} (${CHUNK_BYTES} bytes)."
+              HTTP_CODE="$(curl -sS --max-time 1200 \
+                -o /tmp/callback-response.json \
+                -w '%{http_code}' \
+                -X POST \
+                -H "Authorization: Bearer ${WORKER_ADMIN_TOKEN}" \
+                -H "X-Video-ID: ${VIDEO_ID}" \
+                -H "X-Chunk-Index: ${chunk_index}" \
+                -F "file=@${chunk_file};type=audio/ogg" \
+                -F "model=${TRANSCRIPTION_MODEL}" \
+                -F 'response_format=verbose_json' \
+                -F 'timestamp_granularities[]=segment' \
+                -F 'language=zh' \
+                -F 'temperature=0' \
+                "$TRANSCRIBE_URL")"
+
+              cat /tmp/callback-response.json || true
+              echo
+
+              if [[ ! "$HTTP_CODE" =~ ^2 ]]; then
+                echo "Worker chunk transcription failed with HTTP ${HTTP_CODE}" >&2
+                exit 1
+              fi
+
+              FINAL_STATUS="$(jq -r '.status // empty' /tmp/callback-response.json 2>/dev/null || true)"
+              case "$FINAL_STATUS" in
+                chunk_completed)
+                  ;;
+                completed)
+                  echo "Meeting transcription and finalization completed."
+                  exit 0
+                  ;;
+                deferred)
+                  echo "Groq quota reached; progress is saved and the Worker will resume after retry-after."
+                  exit 0
+                  ;;
+                failed)
+                  echo "Worker reported pipeline failure" >&2
+                  exit 1
+                  ;;
+                *)
+                  echo "Unexpected Worker chunk response status: ${FINAL_STATUS:-<empty>}" >&2
+                  exit 1
+                  ;;
+              esac
+            done
+
+            echo "All local chunks were uploaded without a completed/deferred terminal response." >&2
+            exit 1
           else
             if [[ -z "$PAYLOAD" ]]; then
               PAYLOAD="$(jq -n \
                 --arg videoId "$VIDEO_ID" \
-                --arg error "resolver exited without an audio upload or diagnostic" \
+                --arg error "resolver exited without transcription chunks or diagnostic" \
                 '{videoId:$videoId,error:$error}')"
             fi
             HTTP_CODE="$(curl -sS --max-time 60 \
@@ -225,16 +303,13 @@ jobs:
               -H 'Content-Type: application/json' \
               --data "$PAYLOAD" \
               "$CALLBACK_URL")"
-          fi
-
-          cat /tmp/callback-response.json || true
-
-          if [[ ! "$HTTP_CODE" =~ ^2 ]]; then
-            echo "Worker callback/transcription failed with HTTP ${HTTP_CODE}" >&2
-            exit 1
-          fi
-
-          if jq -e '.status == "failed"' /tmp/callback-response.json >/dev/null 2>&1; then
-            echo "Worker reported resolver/pipeline failure" >&2
-            exit 1
+            cat /tmp/callback-response.json || true
+            if [[ ! "$HTTP_CODE" =~ ^2 ]]; then
+              echo "Worker callback failed with HTTP ${HTTP_CODE}" >&2
+              exit 1
+            fi
+            if jq -e '.status == "failed"' /tmp/callback-response.json >/dev/null 2>&1; then
+              echo "Worker reported resolver failure" >&2
+              exit 1
+            fi
           fi

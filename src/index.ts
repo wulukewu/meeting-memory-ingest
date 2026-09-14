@@ -1,7 +1,9 @@
 import type { Env, ScheduledController, WaitUntilContext } from "./types";
-import { loadManifest, resetVideo } from "./github";
+import { loadManifest, makeRetryableNow } from "./github";
 import { handleResolverCallback, handleResolverTranscription, runPlaylist, runSingleVideo } from "./pipeline";
 import { jsonResponse } from "./util";
+
+const PIPELINE_VERSION = "resumable-chunks-v1";
 
 function isAdmin(request: Request, env: Env): boolean {
   const auth = request.headers.get("authorization");
@@ -35,7 +37,7 @@ async function handleFetch(request: Request, env: Env, ctx: WaitUntilContext): P
   const url = new URL(request.url);
 
   if (request.method === "GET" && url.pathname === "/health") {
-    return jsonResponse({ ok: true, service: "meeting-memory-ingest", ...configStatus(env) });
+    return jsonResponse({ ok: true, service: "meeting-memory-ingest", pipelineVersion: PIPELINE_VERSION, ...configStatus(env) });
   }
 
   if (!isAdmin(request, env)) return jsonResponse({ error: "unauthorized" }, 401);
@@ -46,7 +48,7 @@ async function handleFetch(request: Request, env: Env, ctx: WaitUntilContext): P
       .sort(([, a], [, b]) => Date.parse(b.completedAt || b.failedAt || b.startedAt || "1970-01-01") - Date.parse(a.completedAt || a.failedAt || a.startedAt || "1970-01-01"))
       .slice(0, 25)
       .map(([videoId, value]) => ({ videoId, ...value }));
-    return jsonResponse({ ...configStatus(env), manifestUpdatedAt: manifest.updatedAt, recent: entries });
+    return jsonResponse({ pipelineVersion: PIPELINE_VERSION, ...configStatus(env), manifestUpdatedAt: manifest.updatedAt, recent: entries });
   }
 
   const notConfigured = configError(env);
@@ -55,14 +57,17 @@ async function handleFetch(request: Request, env: Env, ctx: WaitUntilContext): P
   if (request.method === "POST" && url.pathname === "/resolver/transcribe") {
     const videoId = request.headers.get("x-video-id")?.trim() || "";
     if (!/^[A-Za-z0-9_-]{6,20}$/.test(videoId)) return jsonResponse({ error: "invalid or missing x-video-id" }, 400);
+    const chunkIndex = Number.parseInt(request.headers.get("x-chunk-index") || "0", 10);
+    if (!Number.isInteger(chunkIndex) || chunkIndex < 0) return jsonResponse({ error: "invalid x-chunk-index" }, 400);
     const contentType = request.headers.get("content-type") || "";
     if (!contentType.toLowerCase().startsWith("multipart/form-data;")) {
       return jsonResponse({ error: "resolver transcription upload must use multipart/form-data" }, 415);
     }
     if (!request.body) return jsonResponse({ error: "missing transcription upload body" }, 400);
 
-    const result = await handleResolverTranscription(env, videoId, request.body, contentType);
-    return jsonResponse(result, result.status === "completed" ? 200 : 500);
+    const result = await handleResolverTranscription(env, videoId, chunkIndex, request.body, contentType);
+    const status = result.status === "failed" ? 500 : result.status === "deferred" ? 202 : 200;
+    return jsonResponse(result, status);
   }
 
   if (request.method === "POST" && url.pathname === "/resolver/callback") {
@@ -96,15 +101,15 @@ async function handleFetch(request: Request, env: Env, ctx: WaitUntilContext): P
     }
     if (existing?.status === "completed") {
       return jsonResponse(
-        { error: "video is already completed; retry only applies to failed or untracked videos", videoId, status: existing.status, path: existing.path },
+        { error: "video is already completed; retry only applies to failed, waiting, or untracked videos", videoId, status: existing.status, path: existing.path },
         409,
       );
     }
-    if (existing?.status === "failed") await resetVideo(env, videoId);
+    if (existing?.status === "failed" || existing?.status === "waiting") await makeRetryableNow(env, videoId);
 
     if (url.searchParams.get("wait") === "1") return jsonResponse(await runSingleVideo(env, videoId));
     ctx.waitUntil(runSingleVideo(env, videoId).then(console.log).catch(console.error));
-    return jsonResponse({ accepted: true, videoId, reset: existing?.status === "failed" }, 202);
+    return jsonResponse({ accepted: true, videoId, resumed: Boolean(existing) }, 202);
   }
 
   if (request.method === "POST" && url.pathname.startsWith("/process/")) {
