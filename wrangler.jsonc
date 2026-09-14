@@ -1,0 +1,23 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "meeting-memory-ingest",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-09-14",
+  "triggers": {
+    "crons": ["*/5 * * * *"]
+  },
+  "vars": {
+    "YOUTUBE_PLAYLIST_ID": "REPLACE_ME",
+    "AI_MEMORY_OWNER": "wulukewu",
+    "AI_MEMORY_REPO": "ai-memory",
+    "AI_MEMORY_BRANCH": "main",
+    "TRANSCRIPT_ROOT": "reference/meeting-transcripts",
+    "GROQ_TRANSCRIPTION_MODEL": "whisper-large-v3",
+    "GROQ_SUMMARY_MODEL": "openai/gpt-oss-120b",
+    "SUMMARY_ENABLED": "true",
+    "MAX_ITEMS_PER_RUN": "1",
+    "MAX_PLAYLIST_PAGES": "10",
+    "PROCESSING_LEASE_MINUTES": "90",
+    "RETRY_FAILED_AFTER_MINUTES": "30"
+  }
+}
