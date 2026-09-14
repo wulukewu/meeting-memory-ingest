@@ -3,6 +3,7 @@
   "name": "meeting-memory-ingest",
   "main": "src/index.ts",
   "compatibility_date": "2026-09-14",
+  "keep_vars": true,
   "triggers": {
     "crons": ["*/5 * * * *"]
   },
