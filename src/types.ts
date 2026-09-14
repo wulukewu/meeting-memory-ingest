@@ -76,6 +76,12 @@ export interface StoredTranscriptChunk {
   transcript: TranscriptResult;
 }
 
+export interface StoredTranscriptWork {
+  version: 1;
+  videoId: string;
+  chunks: Record<string, StoredTranscriptChunk>;
+}
+
 export interface ActionItem {
   owner?: string;
   task: string;
