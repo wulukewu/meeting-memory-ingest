@@ -25,6 +25,7 @@ export interface Env {
   MAX_PLAYLIST_PAGES: string;
   PROCESSING_LEASE_MINUTES: string;
   RETRY_FAILED_AFTER_MINUTES: string;
+  TRANSCRIPTION_CHUNK_SECONDS: string;
 }
 
 export interface WaitUntilContext {
@@ -55,6 +56,9 @@ export interface TranscriptSegment {
   start: number;
   end: number;
   text: string;
+  avgLogprob?: number;
+  noSpeechProb?: number;
+  compressionRatio?: number;
 }
 
 export interface TranscriptResult {
@@ -62,6 +66,14 @@ export interface TranscriptResult {
   language?: string;
   duration?: number;
   segments: TranscriptSegment[];
+}
+
+export interface StoredTranscriptChunk {
+  version: 1;
+  videoId: string;
+  chunkIndex: number;
+  offsetSeconds: number;
+  transcript: TranscriptResult;
 }
 
 export interface ActionItem {
@@ -84,7 +96,7 @@ export interface MeetingSummary {
   tags: string[];
 }
 
-export type ManifestStatus = "processing" | "completed" | "failed";
+export type ManifestStatus = "processing" | "waiting" | "completed" | "failed";
 
 export interface ManifestEntry {
   status: ManifestStatus;
@@ -94,16 +106,29 @@ export interface ManifestEntry {
   startedAt?: string;
   completedAt?: string;
   failedAt?: string;
+  retryAfterAt?: string;
   path?: string;
   lastError?: string;
   transcriptionModel?: string;
   summaryModel?: string;
+  durationSeconds?: number;
+  chunkSeconds?: number;
+  totalChunks?: number;
+  nextChunkIndex?: number;
+  completedChunks?: number[];
 }
 
 export interface Manifest {
   version: 1;
   updatedAt: string;
   videos: Record<string, ManifestEntry>;
+}
+
+export interface ClaimResult {
+  claimed: boolean;
+  reason?: string;
+  attempts?: number;
+  entry?: ManifestEntry;
 }
 
 export interface RunResult {
