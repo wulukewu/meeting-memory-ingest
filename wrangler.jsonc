@@ -8,6 +8,7 @@
   },
   "vars": {
     "YOUTUBE_PLAYLIST_ID": "REPLACE_ME",
+    "YOUTUBE_INNERTUBE_CLIENT": "VISIONOS",
     "AI_MEMORY_OWNER": "wulukewu",
     "AI_MEMORY_REPO": "ai-memory",
     "AI_MEMORY_BRANCH": "main",
