@@ -26,6 +26,11 @@ function configStatus(env: Env) {
   return { configured: missingSecrets.length === 0 && missingVars.length === 0, missingSecrets, missingVars };
 }
 
+function configError(env: Env): Response | null {
+  const status = configStatus(env);
+  return status.configured ? null : jsonResponse({ error: "service is not fully configured", ...status }, 503);
+}
+
 async function handleFetch(request: Request, env: Env, ctx: WaitUntilContext): Promise<Response> {
   const url = new URL(request.url);
 
@@ -34,6 +39,18 @@ async function handleFetch(request: Request, env: Env, ctx: WaitUntilContext): P
   }
 
   if (!isAdmin(request, env)) return jsonResponse({ error: "unauthorized" }, 401);
+
+  if (request.method === "GET" && url.pathname === "/status") {
+    const { manifest } = await loadManifest(env);
+    const entries = Object.entries(manifest.videos)
+      .sort(([, a], [, b]) => Date.parse(b.completedAt || b.failedAt || b.startedAt || "1970-01-01") - Date.parse(a.completedAt || a.failedAt || a.startedAt || "1970-01-01"))
+      .slice(0, 25)
+      .map(([videoId, value]) => ({ videoId, ...value }));
+    return jsonResponse({ ...configStatus(env), manifestUpdatedAt: manifest.updatedAt, recent: entries });
+  }
+
+  const notConfigured = configError(env);
+  if (notConfigured) return notConfigured;
 
   if (request.method === "POST" && url.pathname === "/resolver/callback") {
     const payload = (await request.json()) as { videoId?: string; audioUrl?: string; error?: string };
@@ -44,15 +61,6 @@ async function handleFetch(request: Request, env: Env, ctx: WaitUntilContext): P
       ...(payload.error ? { error: payload.error } : {}),
     });
     return jsonResponse(result);
-  }
-
-  if (request.method === "GET" && url.pathname === "/status") {
-    const { manifest } = await loadManifest(env);
-    const entries = Object.entries(manifest.videos)
-      .sort(([, a], [, b]) => Date.parse(b.completedAt || b.failedAt || b.startedAt || "1970-01-01") - Date.parse(a.completedAt || a.failedAt || a.startedAt || "1970-01-01"))
-      .slice(0, 25)
-      .map(([videoId, value]) => ({ videoId, ...value }));
-    return jsonResponse({ ...configStatus(env), manifestUpdatedAt: manifest.updatedAt, recent: entries });
   }
 
   if (request.method === "POST" && url.pathname === "/run") {
@@ -90,6 +98,11 @@ export default {
   },
 
   scheduled(_controller: ScheduledController, env: Env, ctx: WaitUntilContext): void {
+    const status = configStatus(env);
+    if (!status.configured) {
+      console.warn("scheduled ingest skipped: service is not fully configured", JSON.stringify(status));
+      return;
+    }
     ctx.waitUntil(
       runPlaylist(env, "cron")
         .then((result) => console.log("scheduled ingest", JSON.stringify(result)))
