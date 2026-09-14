@@ -25,14 +25,18 @@ jobs:
         with:
           python-version: "3.13"
 
-      - name: Install pinned yt-dlp
-        run: python -m pip install --disable-pip-version-check "yt-dlp==2026.8.19"
+      - name: Install resolver dependencies
+        run: |
+          python -m pip install --disable-pip-version-check "yt-dlp==2026.8.19"
+          sudo apt-get update
+          sudo apt-get install -y wireguard-tools
 
-      - name: Resolve signed audio URL and callback Worker
+      - name: Resolve through WireGuard and callback Worker
         env:
           VIDEO_ID: ${{ inputs.video_id }}
           CALLBACK_URL: ${{ inputs.callback_url }}
           WORKER_ADMIN_TOKEN: ${{ secrets.WORKER_ADMIN_TOKEN }}
+          WG_CONF: ${{ secrets.WG_CONF }}
         shell: bash
         run: |
           set -uo pipefail
@@ -45,6 +49,10 @@ jobs:
             echo "WORKER_ADMIN_TOKEN secret is not configured" >&2
             exit 2
           fi
+          if [[ -z "${WG_CONF:-}" ]]; then
+            echo "WG_CONF secret is not configured" >&2
+            exit 2
+          fi
           if [[ ! "$CALLBACK_URL" =~ ^https:// ]]; then
             echo "Callback URL must use https" >&2
             exit 2
@@ -52,42 +60,99 @@ jobs:
 
           ERR_FILE="$(mktemp)"
           AUDIO_URL=""
+          PAYLOAD=""
+          WG_UP=0
 
-          resolve_with_client() {
-            local clients="$1"
-            : > "$ERR_FILE"
-            set +e
-            AUDIO_URL="$(yt-dlp \
-              --no-playlist \
-              --js-runtimes node \
-              --extractor-args "youtube:player_client=${clients}" \
-              --format '140/bestaudio[ext=m4a]/bestaudio' \
-              --get-url \
-              "https://www.youtube.com/watch?v=${VIDEO_ID}" \
-              2>"$ERR_FILE")"
-            local rc=$?
-            set -e
-            AUDIO_URL="$(printf '%s\n' "$AUDIO_URL" | sed -n '1p')"
-            [[ $rc -eq 0 && "$AUDIO_URL" == https://* ]]
+          cleanup_wg() {
+            if [[ "$WG_UP" == "1" ]]; then
+              sudo wg-quick down wg0 >/dev/null 2>&1 || true
+              WG_UP=0
+            fi
           }
+          trap cleanup_wg EXIT
 
-          set -e
-          if ! resolve_with_client "visionos"; then
-            if ! resolve_with_client "default,web_embedded"; then
-              ERROR_TEXT="$(tail -c 1200 "$ERR_FILE" | tr '\r\n' '  ' | sed 's/[[:space:]]\+/ /g')"
+          BEFORE_IP="$(curl -4 -fsS --max-time 10 https://api.ipify.org || true)"
+          if [[ -n "$BEFORE_IP" ]]; then
+            echo "::add-mask::$BEFORE_IP"
+          fi
+
+          printf '%s\n' "$WG_CONF" | sudo tee /etc/wireguard/wg0.conf >/dev/null
+          sudo chmod 600 /etc/wireguard/wg0.conf
+
+          if sudo modprobe wireguard 2>/dev/null; then
+            sudo wg-quick up wg0
+          else
+            echo "Kernel WireGuard module unavailable; falling back to wireguard-go."
+            sudo apt-get install -y wireguard-go
+            sudo env WG_QUICK_USERSPACE_IMPLEMENTATION=wireguard-go wg-quick up wg0
+          fi
+          WG_UP=1
+
+          AFTER_IP="$(curl -4 -fsS --max-time 15 https://api.ipify.org || true)"
+          if [[ -n "$AFTER_IP" ]]; then
+            echo "::add-mask::$AFTER_IP"
+          fi
+
+          if [[ -z "$AFTER_IP" ]]; then
+            PAYLOAD="$(jq -n \
+              --arg videoId "$VIDEO_ID" \
+              --arg error "WireGuard came up but public IPv4 could not be reached through the tunnel" \
+              '{videoId:$videoId,error:$error}')"
+          elif [[ -n "$BEFORE_IP" && "$BEFORE_IP" == "$AFTER_IP" ]]; then
+            PAYLOAD="$(jq -n \
+              --arg videoId "$VIDEO_ID" \
+              --arg error "WireGuard tunnel did not change the runner public IPv4; check AllowedIPs=0.0.0.0/0 and server NAT/forwarding" \
+              '{videoId:$videoId,error:$error}')"
+          else
+            echo "WireGuard public IPv4 egress changed successfully."
+
+            resolve_with_client() {
+              local clients="$1"
+              : > "$ERR_FILE"
+              set +e
+              AUDIO_URL="$(yt-dlp \
+                --no-playlist \
+                --js-runtimes node \
+                --extractor-args "youtube:player_client=${clients}" \
+                --format '140/bestaudio[ext=m4a]/bestaudio' \
+                --get-url \
+                "https://www.youtube.com/watch?v=${VIDEO_ID}" \
+                2>"$ERR_FILE")"
+              local rc=$?
+              set -e
+              AUDIO_URL="$(printf '%s\n' "$AUDIO_URL" | sed -n '1p')"
+              [[ $rc -eq 0 && "$AUDIO_URL" == https://* ]]
+            }
+
+            set -e
+            if ! resolve_with_client "visionos"; then
+              if ! resolve_with_client "default,web_embedded"; then
+                ERROR_TEXT="$(tail -c 1200 "$ERR_FILE" | tr '\r\n' '  ' | sed 's/[[:space:]]\+/ /g')"
+                PAYLOAD="$(jq -n \
+                  --arg videoId "$VIDEO_ID" \
+                  --arg error "yt-dlp could not resolve audio through WireGuard: ${ERROR_TEXT}" \
+                  '{videoId:$videoId,error:$error}')"
+              fi
+            fi
+
+            if [[ -n "$AUDIO_URL" ]]; then
+              echo "::add-mask::$AUDIO_URL"
               PAYLOAD="$(jq -n \
                 --arg videoId "$VIDEO_ID" \
-                --arg error "yt-dlp could not resolve audio: ${ERROR_TEXT}" \
-                '{videoId:$videoId,error:$error}')"
+                --arg audioUrl "$AUDIO_URL" \
+                '{videoId:$videoId,audioUrl:$audioUrl}')"
             fi
           fi
 
-          if [[ -n "$AUDIO_URL" ]]; then
-            echo "::add-mask::$AUDIO_URL"
+          # Restore the runner's normal egress before calling the Worker back.
+          cleanup_wg
+          trap - EXIT
+
+          if [[ -z "$PAYLOAD" ]]; then
             PAYLOAD="$(jq -n \
               --arg videoId "$VIDEO_ID" \
-              --arg audioUrl "$AUDIO_URL" \
-              '{videoId:$videoId,audioUrl:$audioUrl}')"
+              --arg error "resolver exited without an audio URL or diagnostic" \
+              '{videoId:$videoId,error:$error}')"
           fi
 
           HTTP_CODE="$(curl -sS \
@@ -106,3 +171,8 @@ jobs:
           fi
 
           cat /tmp/callback-response.json
+
+          if jq -e '.status == "failed"' /tmp/callback-response.json >/dev/null 2>&1; then
+            echo "Worker reported resolver/pipeline failure" >&2
+            exit 1
+          fi
