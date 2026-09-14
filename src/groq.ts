@@ -11,6 +11,30 @@ import {
 
 const GROQ_ROOT = "https://api.groq.com/openai/v1";
 
+export class GroqRateLimitError extends Error {
+  readonly retryAfterSeconds: number;
+
+  constructor(message: string, retryAfterSeconds: number) {
+    super(message);
+    this.name = "GroqRateLimitError";
+    this.retryAfterSeconds = retryAfterSeconds;
+  }
+}
+
+function parseRetryAfterSeconds(response: Response, body: string): number {
+  const header = Number.parseFloat(response.headers.get("retry-after") || "");
+  if (Number.isFinite(header) && header > 0) return header;
+
+  const match = body.match(/try again in\s+(?:(\d+(?:\.\d+)?)m)?\s*(?:(\d+(?:\.\d+)?)s)?/i);
+  if (match) {
+    const minutes = Number.parseFloat(match[1] || "0");
+    const seconds = Number.parseFloat(match[2] || "0");
+    const total = minutes * 60 + seconds;
+    if (total > 0) return total;
+  }
+  return 30 * 60;
+}
+
 async function groqFetch(env: Env, path: string, init: RequestInit, maxAttempts = 4): Promise<Response> {
   let lastError = "unknown Groq error";
   for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
@@ -25,10 +49,10 @@ async function groqFetch(env: Env, path: string, init: RequestInit, maxAttempts 
 
     const body = await response.text();
     lastError = `Groq ${path} failed (${response.status}): ${truncate(body, 1200)}`;
-    if (response.status !== 429 || attempt === maxAttempts) throw new Error(lastError);
+    if (response.status !== 429) throw new Error(lastError);
 
-    const retryHeader = response.headers.get("retry-after");
-    const retrySeconds = retryHeader ? Number.parseFloat(retryHeader) : 10 * attempt;
+    const retrySeconds = parseRetryAfterSeconds(response, body);
+    if (attempt === maxAttempts) throw new GroqRateLimitError(lastError, retrySeconds);
     await sleep(Math.min(Math.max(retrySeconds, 1), 75) * 1000);
   }
   throw new Error(lastError);
@@ -38,20 +62,36 @@ function normalizeTranscript(raw: {
   text?: string;
   language?: string;
   duration?: number;
-  segments?: Array<{ id?: number; start?: number; end?: number; text?: string }>;
+  segments?: Array<{
+    id?: number;
+    start?: number;
+    end?: number;
+    text?: string;
+    avg_logprob?: number;
+    no_speech_prob?: number;
+    compression_ratio?: number;
+  }>;
 }): TranscriptResult {
-  const segments: TranscriptSegment[] = (raw.segments || [])
+  const rawSegments = raw.segments || [];
+  const segments: TranscriptSegment[] = rawSegments
     .filter((segment) => typeof segment.start === "number" && typeof segment.end === "number" && segment.text)
     .map((segment) => ({
       id: segment.id,
       start: segment.start || 0,
       end: segment.end || 0,
       text: (segment.text || "").trim(),
-    }));
+      avgLogprob: segment.avg_logprob,
+      noSpeechProb: segment.no_speech_prob,
+      compressionRatio: segment.compression_ratio,
+    }))
+    // Be deliberately conservative: only discard segments Whisper itself marks
+    // as overwhelmingly likely to be non-speech. This targets repeated silence
+    // hallucinations without trying to second-guess low-confidence real speech.
+    .filter((segment) => segment.noSpeechProb == null || segment.noSpeechProb < 0.8);
 
-  if (!raw.text && segments.length === 0) throw new Error("Groq returned an empty transcript");
+  if (!raw.text && rawSegments.length === 0) throw new Error("Groq returned an empty transcript");
   return {
-    text: raw.text || segments.map((segment) => segment.text).join(" "),
+    text: rawSegments.length > 0 ? segments.map((segment) => segment.text).join(" ") : raw.text || "",
     language: raw.language,
     duration: raw.duration,
     segments,
@@ -61,17 +101,15 @@ function normalizeTranscript(raw: {
 export async function transcribeAudioUrl(
   env: Env,
   audioUrl: string,
-  video: VideoRecord,
+  _video: VideoRecord,
 ): Promise<TranscriptResult> {
   const form = new FormData();
   form.set("url", audioUrl);
   form.set("model", env.GROQ_TRANSCRIPTION_MODEL || "whisper-large-v3");
   form.set("response_format", "verbose_json");
   form.append("timestamp_granularities[]", "segment");
-  form.set(
-    "prompt",
-    truncate(`繁體中文會議，可能混用英文技術名詞。保留英文技術詞、程式名稱與人名原文。影片標題：${video.title}`, 180),
-  );
+  form.set("language", "zh");
+  form.set("temperature", "0");
 
   const response = await groqFetch(env, "audio/transcriptions", { method: "POST", body: form }, 3);
   return normalizeTranscript(await response.json());
@@ -88,8 +126,7 @@ export async function transcribeAudioUpload(
 
   // The incoming multipart stream is intentionally forwarded without parsing or
   // buffering the audio in the Worker. A request stream cannot be replayed, so
-  // this path performs one Groq attempt; the resolver workflow can retry the
-  // whole upload if a transient failure occurs.
+  // rate limits are surfaced with their retry-after value to the resumable queue.
   const response = await groqFetch(
     env,
     "audio/transcriptions",
@@ -200,6 +237,7 @@ export async function summarizeMeeting(
       [
         "你正在整理會議逐字稿。只輸出有效 JSON，不要 Markdown。",
         "不要把不確定的內容補猜成事實。保留技術名詞、人名與時間戳。",
+        "只有逐字稿中明確表達為決定或待辦的內容，才能列入 decisions/actionItems；討論中的可能性、建議與探索不要升格成待辦。",
         "JSON keys 必須是 summary, decisions, actionItems, topics, tags。",
         "actionItems 元素格式 {owner?: string, task: string}；topics 元素格式 {timestamp?: string, topic: string}。",
       ].join("\n"),
@@ -214,6 +252,7 @@ export async function summarizeMeeting(
     [
       "你在將多段會議摘要合併成可長期查閱的會議索引。只輸出有效 JSON，不要 Markdown。",
       "避免重複；不要創造逐字稿中沒有的決定、分工或姓名。",
+      "只有明確承諾、指派或確認的事項才保留在 decisions/actionItems。",
       "category 用簡短 kebab-case；若標題明顯是 campus-agent/資工專題、演算法、MCL，優先使用 campus-agent、algorithm、mcl。",
       "JSON keys 必須是 title, category, summary, decisions, actionItems, topics, tags。",
     ].join("\n"),
