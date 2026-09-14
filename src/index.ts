@@ -3,6 +3,8 @@ import { loadManifest, makeRetryableNow } from "./github";
 import { handleResolverCallback, handleResolverTranscription, runPlaylist, runSingleVideo } from "./pipeline";
 import { jsonResponse } from "./util";
 
+const PIPELINE_VERSION = "resumable-chunks-v1";
+
 function isAdmin(request: Request, env: Env): boolean {
   const auth = request.headers.get("authorization");
   return Boolean(env.ADMIN_TOKEN && auth === `Bearer ${env.ADMIN_TOKEN}`);
@@ -35,7 +37,7 @@ async function handleFetch(request: Request, env: Env, ctx: WaitUntilContext): P
   const url = new URL(request.url);
 
   if (request.method === "GET" && url.pathname === "/health") {
-    return jsonResponse({ ok: true, service: "meeting-memory-ingest", ...configStatus(env) });
+    return jsonResponse({ ok: true, service: "meeting-memory-ingest", pipelineVersion: PIPELINE_VERSION, ...configStatus(env) });
   }
 
   if (!isAdmin(request, env)) return jsonResponse({ error: "unauthorized" }, 401);
@@ -46,7 +48,7 @@ async function handleFetch(request: Request, env: Env, ctx: WaitUntilContext): P
       .sort(([, a], [, b]) => Date.parse(b.completedAt || b.failedAt || b.startedAt || "1970-01-01") - Date.parse(a.completedAt || a.failedAt || a.startedAt || "1970-01-01"))
       .slice(0, 25)
       .map(([videoId, value]) => ({ videoId, ...value }));
-    return jsonResponse({ ...configStatus(env), manifestUpdatedAt: manifest.updatedAt, recent: entries });
+    return jsonResponse({ pipelineVersion: PIPELINE_VERSION, ...configStatus(env), manifestUpdatedAt: manifest.updatedAt, recent: entries });
   }
 
   const notConfigured = configError(env);
