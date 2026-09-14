@@ -1,6 +1,6 @@
-import type { Env, RunResult, TriggerKind, VideoRecord } from "./types";
+import type { Env, RunResult, TranscriptResult, TriggerKind, VideoRecord } from "./types";
 import { claimVideo, completeVideo, failVideo, loadManifest, upsertTextFile } from "./github";
-import { summarizeMeeting, transcribeAudioUrl } from "./groq";
+import { summarizeMeeting, transcribeAudioUpload, transcribeAudioUrl } from "./groq";
 import { buildTranscriptPath, renderMeetingMarkdown } from "./markdown";
 import { dispatchYouTubeResolver } from "./resolver-dispatch";
 import { errorMessage, parsePositiveInt } from "./util";
@@ -24,16 +24,20 @@ async function dispatchClaimedVideo(env: Env, video: VideoRecord): Promise<void>
   }
 }
 
+async function persistTranscript(env: Env, video: VideoRecord, transcript: TranscriptResult): Promise<string> {
+  const summary = await summarizeMeeting(env, video, transcript);
+  const path = buildTranscriptPath(env, video, summary);
+  const markdown = renderMeetingMarkdown(env, video, transcript, summary);
+  await upsertTextFile(env, path, markdown, `feat(meetings): ingest ${video.id}`);
+  await completeVideo(env, video, path);
+  return path;
+}
+
 async function processResolvedVideo(env: Env, video: VideoRecord, audioUrl: string): Promise<string> {
   try {
     const safeAudioUrl = validateResolvedAudioUrl(audioUrl);
     const transcript = await transcribeAudioUrl(env, safeAudioUrl, video);
-    const summary = await summarizeMeeting(env, video, transcript);
-    const path = buildTranscriptPath(env, video, summary);
-    const markdown = renderMeetingMarkdown(env, video, transcript, summary);
-    await upsertTextFile(env, path, markdown, `feat(meetings): ingest ${video.id}`);
-    await completeVideo(env, video, path);
-    return path;
+    return await persistTranscript(env, video, transcript);
   } catch (error) {
     await failVideo(env, video, error);
     throw error;
@@ -104,6 +108,39 @@ export async function runSingleVideo(env: Env, videoId: string): Promise<RunResu
     result.failed.push({ videoId, error: errorMessage(error) });
   }
   return result;
+}
+
+async function getClaimedVideo(env: Env, videoId: string): Promise<VideoRecord> {
+  if (!/^[A-Za-z0-9_-]{6,20}$/.test(videoId)) throw new Error("invalid video id");
+
+  const { manifest } = await loadManifest(env);
+  const entry = manifest.videos[videoId];
+  if (entry?.status === "completed") {
+    throw new Error(`video ${videoId} is already completed`);
+  }
+  if (!entry || entry.status !== "processing") {
+    throw new Error(`video ${videoId} is not currently claimed for processing`);
+  }
+
+  const accessToken = await getYouTubeAccessToken(env);
+  return getVideo(env, accessToken, videoId);
+}
+
+export async function handleResolverTranscription(
+  env: Env,
+  videoId: string,
+  body: BodyInit,
+  contentType: string,
+): Promise<{ videoId: string; status: "completed" | "failed"; path?: string }> {
+  const video = await getClaimedVideo(env, videoId);
+  try {
+    const transcript = await transcribeAudioUpload(env, body, contentType);
+    const path = await persistTranscript(env, video, transcript);
+    return { videoId, status: "completed", path };
+  } catch (error) {
+    await failVideo(env, video, error);
+    return { videoId, status: "failed" };
+  }
 }
 
 export async function handleResolverCallback(
