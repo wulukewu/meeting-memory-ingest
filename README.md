@@ -1,15 +1,17 @@
 # meeting-memory-ingest
 
-把一個 **Private YouTube playlist** 當成 AI Memory Inbox。平常影片可保持 `Private`；要處理時手動切成 `Unlisted`。Cloudflare Worker 每 5 分鐘掃一次，只有真的有新影片時才 dispatch 一個短暫 GitHub Action，用 yt-dlp 解析 signed audio URL；之後 Groq 轉錄／摘要，再把 Markdown 寫進 `wulukewu/ai-memory`。
+把一個 **Private YouTube playlist** 當成 AI Memory Inbox。平常影片保持 `Private`；要處理時手動切成 `Unlisted`。Cloudflare Worker 每 5 分鐘掃一次，只有真正需要 ingest 的影片才 dispatch GitHub Actions。Action 透過 WireGuard 從可信任出口下載 YouTube 音訊、切成可續傳的轉錄 chunks，再由 Groq 轉錄／摘要，最後把 Markdown 寫進 `wulukewu/ai-memory`。
 
 ## 日常操作
 
 1. 錄影／錄音後上傳 YouTube，平常保持 `Private`。
-2. 要讓 AI 處理時，把該影片改成 `Unlisted`，並放進唯一的 Private playlist。
-3. Worker 每 5 分鐘掃一次，每輪預設只 claim 1 支。
-4. Claim 成功後 Worker dispatch GitHub Actions resolver；Action 只解析 signed audio URL，不下載整支影片。
-5. Resolver callback Worker 後，Worker 用 Groq Whisper 轉錄、GPT-OSS 摘要，再 commit 到 `ai-memory`。
-6. 完成後有空再把影片切回 `Private`。
+2. 放進唯一的 Private playlist。
+3. 要讓 AI 處理時，把該影片改成 `Unlisted`。
+4. Worker 最多約 5 分鐘內會發現它並自動開始。
+5. 短片會一次完成；長片會自動切段、保存進度，碰到 Groq quota 會等 `retry-after` 後再續跑。
+6. 完成後有空再把影片切回 `Private`。已完成的影片不會重複 ingest。
+
+不需要日常手動呼叫 `/run` 或 `/retry`。
 
 ## Architecture
 
@@ -18,50 +20,64 @@ Private YouTube playlist
         │
         │ YouTube Data API + readonly OAuth
         ▼
-Cloudflare Worker Cron
+Cloudflare Worker Cron (*/5)
         │
         ├─ Private video  → skip
-        └─ Unlisted video → claim manifest
+        └─ Unlisted video → claim ai-memory manifest
                 │
                 ▼
-   GitHub Actions (on demand only)
-        yt-dlp resolve URL
-                │
-                │ signed googlevideo URL
-                ▼
-      Worker /resolver/callback
-                │
-                ▼
-       Groq Whisper Large v3
-                │
-      transcript + timestamps
-                ▼
-        Groq GPT-OSS 120B
- summary / decisions / actions
+GitHub Actions (on demand only)
+        │
+        ├─ WireGuard full-tunnel egress
+        ├─ yt-dlp format 140, native 8 MB HTTP chunks
+        ├─ ffmpeg → 16 kHz mono Opus 24 kbps
+        └─ split into 45-minute transcript chunks
                 │
                 ▼
-        GitHub Contents API
+Worker /resolver/transcribe
+        │ streaming multipart proxy
+        ▼
+Groq Whisper Large v3
+        │
+        ├─ chunk transcript cached in ai-memory/_work
+        ├─ 429 → save retryAfterAt and stop cleanly
+        └─ next Cron resumes first unfinished chunk
                 │
+       all chunks complete
                 ▼
+merge timestamps to whole-video timeline
+        │
+        ▼
+Groq GPT-OSS 120B
+summary / decisions / actions / topics
+        │
+        ▼
+GitHub Contents API
+        │
+        ▼
 wulukewu/ai-memory/main
 reference/meeting-transcripts/...
 ```
 
-大型影音 bytes 不經過 Worker，也不由 Actions 下載保存。Actions 只負責 YouTube playback URL resolution；Groq 直接抓 signed URL。
+### Why chunks?
 
-## 為什麼 resolver 改成 GitHub Actions？
+Groq Free tier direct uploads are limited to 25 MB and Whisper has audio-seconds rate limits. Long recordings (including 4–8 hour meetings) therefore cannot safely be treated as one request. The pipeline uses 2,700-second (45-minute) chunks so each upload stays small and completed work can survive rate limits or transient failures.
 
-Cloudflare Workers Free 每次 invocation 的 CPU budget 很小。實測 `youtubei.js` player decipher 會觸發 Cloudflare `1102`；Browser Run 雖然可以播放 YouTube，但 2026 的 web client 會大量使用 SABR/UMP (`application/vnd.yt-ump`)，不再可靠暴露獨立 audio URL。
+The resumable state is kept in `reference/meeting-transcripts/_manifest.json`; in-progress transcript chunks are temporarily stored in `reference/meeting-transcripts/_work/<videoId>.json` and deleted after final Markdown is committed.
 
-GitHub-hosted Ubuntu runner 上已實測 yt-dlp 可以取得傳統 signed audio URL，而且該 URL 可由另一個 IP 成功下載。把 yt-dlp 限定為 **有新 meeting 才執行一次**，可以避免每 5 分鐘燒 private-repo Actions minutes。
+## YouTube / WireGuard model
 
-## Playlist privacy model
+GitHub-hosted datacenter IPs can trigger YouTube bot checks. In addition, real testing showed the resulting `googlevideo` signed URL can be bound to the source IP. The resolver therefore downloads the audio while WireGuard is still active instead of handing the signed URL to Groq.
 
-- Playlist 本身可以一直保持 **Private**。
-- Worker 用 `youtube.readonly` OAuth 讀 Private playlist metadata。
-- Private 影片只會被看到 metadata，不會處理。
-- 真正要 ingest 的影片需暫時設成 **Unlisted**。
-- Worker 沒有修改影片 privacy 的權限。
+The workflow verifies that WireGuard actually changes the runner public IPv4 before touching YouTube.
+
+Playlist/privacy behavior:
+
+- Playlist can stay **Private** permanently.
+- Worker uses `youtube.readonly` OAuth to read it.
+- `Private` videos are ignored.
+- `Unlisted` means "enqueue this recording for ingest".
+- Worker has no permission to change video privacy.
 
 ## 1. Install
 
@@ -73,7 +89,7 @@ npm run typecheck
 
 ## 2. Cloudflare runtime configuration
 
-Dashboard：
+Dashboard:
 
 ```text
 Workers & Pages
@@ -82,20 +98,20 @@ Workers & Pages
 → Variables and Secrets
 ```
 
-必填 Variables：
+Dashboard-only Variables:
 
 ```text
 YOUTUBE_PLAYLIST_ID
 WORKER_PUBLIC_URL
 ```
 
-例如：
+Example:
 
 ```text
 WORKER_PUBLIC_URL=https://meeting-memory-ingest.ai-memory.workers.dev
 ```
 
-必填 Secrets：
+Secrets:
 
 ```text
 GROQ_API_KEY
@@ -107,45 +123,54 @@ ADMIN_TOKEN
 RESOLVER_GITHUB_TOKEN
 ```
 
-`GITHUB_TOKEN`：只需能對 `wulukewu/ai-memory` 做 Contents Read/Write。
+`GITHUB_TOKEN`: fine-grained PAT limited to `wulukewu/ai-memory`, Contents Read/Write.
 
-`RESOLVER_GITHUB_TOKEN`：另建 fine-grained PAT，只授權 `wulukewu/meeting-memory-ingest`，需要：
+`RESOLVER_GITHUB_TOKEN`: separate fine-grained PAT limited to `wulukewu/meeting-memory-ingest`, Actions Read/Write.
 
-```text
-Actions: Read and write
-Metadata: Read
-```
+Do not put runtime credentials in Cloudflare Build variables.
 
-不要把 runtime credentials 放在 Cloudflare Build variables。
+## 3. GitHub Actions secrets
 
-## 3. GitHub Actions callback secret
-
-在 `wulukewu/meeting-memory-ingest`：
+Repository:
 
 ```text
-Settings
+wulukewu/meeting-memory-ingest
+→ Settings
 → Secrets and variables
 → Actions
-→ New repository secret
 ```
 
-新增：
+Required:
 
 ```text
-Name: WORKER_ADMIN_TOKEN
-Value: 與 Cloudflare ADMIN_TOKEN 完全相同
+WORKER_ADMIN_TOKEN  # exactly the same value as Worker ADMIN_TOKEN
+WG_CONF             # dedicated WireGuard peer, full-tunnel IPv4
 ```
 
-Resolver workflow 不需要 Groq key、YouTube OAuth secrets 或 ai-memory PAT。
+`WG_CONF` must route YouTube traffic through the tunnel, typically:
+
+```ini
+[Interface]
+PrivateKey = ...
+Address = 10.x.x.x/32
+
+[Peer]
+PublicKey = ...
+Endpoint = ...:51820
+AllowedIPs = 0.0.0.0/0
+PersistentKeepalive = 25
+```
+
+The WireGuard server must provide forwarding + NAT/MASQUERADE to the Internet.
+
+Actions never receive the Groq API key, Google OAuth client secret, YouTube refresh token, or ai-memory PAT.
 
 ## 4. YouTube OAuth
 
-Worker 要讀 Private playlist，所以需要 OAuth，而不是單純 API key。
-
-1. Enable **YouTube Data API v3**。
-2. 建 OAuth Desktop client。
-3. 取得 `YOUTUBE_CLIENT_ID`、`YOUTUBE_CLIENT_SECRET`。
-4. 執行：
+1. Enable **YouTube Data API v3**.
+2. Create an OAuth Desktop client.
+3. Obtain `YOUTUBE_CLIENT_ID`, `YOUTUBE_CLIENT_SECRET`.
+4. Run:
 
 ```bash
 export YOUTUBE_CLIENT_ID='...'
@@ -153,62 +178,92 @@ export YOUTUBE_CLIENT_SECRET='...'
 npm run youtube:auth
 ```
 
-把產生的 `YOUTUBE_REFRESH_TOKEN` 設成 Cloudflare Secret。
+Store the resulting `YOUTUBE_REFRESH_TOKEN` as a Cloudflare Secret.
 
-Scope 只有：
+Scope:
 
 ```text
 https://www.googleapis.com/auth/youtube.readonly
 ```
 
-## 5. Resolver workflow
+## 5. Resolver behavior
 
-`.github/workflows/resolve-youtube.yml` 只接受 `workflow_dispatch`。Worker claim 一支影片後才呼叫 GitHub API dispatch workflow。
+The workflow is `workflow_dispatch` only. Worker dispatches it after winning a manifest claim.
 
-Resolver 預設：
+Defaults:
 
 ```text
-yt-dlp 2026.08.19
-client 1: visionos
-client 2 fallback: default,web_embedded
+yt-dlp: 2026.08.19
+YouTube client 1: visionos
+fallback: default,web_embedded
 format: 140 / bestaudio m4a / bestaudio
+native HTTP chunk: 8 MB
+transcript chunk: 2700 seconds (45 min)
+preprocessing: 16 kHz mono Opus 24 kbps
 ```
 
-Action 成功後把 signed `googlevideo.com` URL POST 到：
+Each resolver run downloads the source once, prepares all local 45-minute chunks, then starts at the manifest's `nextChunkIndex`.
+
+For each chunk:
 
 ```text
-POST /resolver/callback
+POST /resolver/transcribe
 Authorization: Bearer <WORKER_ADMIN_TOKEN>
+X-Video-ID: ...
+X-Chunk-Index: ...
 ```
 
-Worker 會驗證 callback URL 必須是 HTTPS `googlevideo.com`，再交給 Groq。
+Worker streams the multipart body directly to Groq without buffering the audio.
 
-## 6. Deploy
+### Rate limits / resume
+
+If Groq returns `429`, Worker records the API's `retry-after` as `retryAfterAt`, changes the manifest to `waiting`, and returns HTTP 202 to Actions. The workflow exits successfully because progress was saved intentionally.
+
+Cron will not re-claim that video before `retryAfterAt`. Once eligible again it dispatches a new Action starting at the first unfinished chunk. Already completed chunks are never sent to Whisper again.
+
+If a non-rate-limit failure occurs, status becomes `failed` and the normal 30-minute retry cooldown applies. A lost/stuck `processing` claim expires after 90 minutes.
+
+## 6. Transcript quality
+
+Whisper request parameters:
+
+```text
+language=zh
+temperature=0
+response_format=verbose_json
+timestamp_granularities[]=segment
+```
+
+No instructional Whisper prompt is used. This avoids prompt text being hallucinated into low-speech portions of a recording.
+
+The Worker also conservatively drops segments for which Whisper reports `no_speech_prob >= 0.8`. This is intended to remove obvious silence hallucinations without aggressively deleting uncertain real speech.
+
+Final summary prompts are conservative: discussion possibilities must not be promoted to decisions/action items unless the transcript explicitly contains a decision, commitment, or assignment.
+
+## 7. Deploy
 
 ```bash
 npm install
 npm run deploy
 ```
 
-Cron：
+Cron:
 
 ```text
 */5 * * * *
 ```
 
-`keep_vars: true` 已開啟，避免 repo deploy 清掉 Dashboard-only vars/secrets。
+`keep_vars: true` is enabled so repository deploys do not erase Dashboard-only vars/secrets.
 
-若新 resolver 設定尚未補齊，`/health` 會顯示缺項，而且 Cron 會直接 skip，不會動 manifest。
+## 8. Endpoints
 
-## 7. Endpoints
-
-Health：
+Health:
 
 ```text
 GET /health
 ```
 
-Status：
+Status:
 
 ```bash
 curl \
@@ -216,7 +271,7 @@ curl \
   https://meeting-memory-ingest.ai-memory.workers.dev/status
 ```
 
-Process one video：
+Process one video:
 
 ```bash
 curl -X POST \
@@ -224,9 +279,7 @@ curl -X POST \
   'https://meeting-memory-ingest.ai-memory.workers.dev/process/VIDEO_ID?wait=1'
 ```
 
-成功 claim 後會回 `dispatched: [VIDEO_ID]`；真正完成狀態稍後由 Action callback 更新 manifest。
-
-Force retry：
+Manual retry/resume:
 
 ```bash
 curl -X POST \
@@ -234,31 +287,36 @@ curl -X POST \
   'https://meeting-memory-ingest.ai-memory.workers.dev/retry/VIDEO_ID?wait=1'
 ```
 
-## 8. ai-memory output
+Manual retry preserves completed chunk progress; it no longer resets the video to zero.
+
+## 9. ai-memory output
 
 ```text
 reference/meeting-transcripts/
 ├── _manifest.json
+├── _work/              # temporary resumable state; removed after completion
 ├── campus-agent/
 ├── algorithm/
 ├── mcl/
 └── general/
 ```
 
-Manifest 狀態：
+Typical state flow:
 
 ```text
-processing → completed
-           ↘ failed
+processing ──chunk success──> processing
+    │
+    ├─ Groq 429 ────────────> waiting ──retryAfterAt──> processing
+    ├─ other error ─────────> failed  ──cooldown─────> processing
+    └─ all chunks + summary ─> completed
 ```
-
-processing lease 預設 90 分鐘，failed retry cooldown 預設 30 分鐘。
 
 ## Security notes
 
-- YouTube OAuth 是 readonly。
-- Worker 無法修改影片 privacy。
-- `GITHUB_TOKEN` 與 `RESOLVER_GITHUB_TOKEN` 分開，避免擴大 ai-memory PAT 權限。
-- Actions 只拿 `WORKER_ADMIN_TOKEN`，不持有 Groq / Google OAuth / ai-memory secrets。
-- Resolver 不把 signed URL commit 到任何 repo；callback 後即丟給 Groq。
-- AI summary 只寫 reference，不會自動提升到 `core.md`。
+- YouTube OAuth is readonly.
+- Worker cannot modify video privacy.
+- `GITHUB_TOKEN` and `RESOLVER_GITHUB_TOKEN` are deliberately separate.
+- Actions only receive `WORKER_ADMIN_TOKEN` and the dedicated WireGuard config.
+- Signed YouTube media URLs are not stored or committed.
+- Temporary transcript work data lives only in the private `ai-memory` repository and is deleted after completion.
+- AI summaries remain reference material and do not automatically modify `core.md`.
