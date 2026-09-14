@@ -72,10 +72,26 @@ async function handleFetch(request: Request, env: Env, ctx: WaitUntilContext): P
   if (request.method === "POST" && url.pathname.startsWith("/retry/")) {
     const videoId = url.pathname.slice("/retry/".length).trim();
     if (!/^[A-Za-z0-9_-]{6,20}$/.test(videoId)) return jsonResponse({ error: "invalid video id" }, 400);
-    await resetVideo(env, videoId);
+
+    const { manifest } = await loadManifest(env);
+    const existing = manifest.videos[videoId];
+    if (existing?.status === "processing") {
+      return jsonResponse(
+        { error: "video is already processing; retry did not reset the active claim", videoId, status: existing.status },
+        409,
+      );
+    }
+    if (existing?.status === "completed") {
+      return jsonResponse(
+        { error: "video is already completed; retry only applies to failed or untracked videos", videoId, status: existing.status, path: existing.path },
+        409,
+      );
+    }
+    if (existing?.status === "failed") await resetVideo(env, videoId);
+
     if (url.searchParams.get("wait") === "1") return jsonResponse(await runSingleVideo(env, videoId));
     ctx.waitUntil(runSingleVideo(env, videoId).then(console.log).catch(console.error));
-    return jsonResponse({ accepted: true, videoId, reset: true }, 202);
+    return jsonResponse({ accepted: true, videoId, reset: existing?.status === "failed" }, 202);
   }
 
   if (request.method === "POST" && url.pathname.startsWith("/process/")) {
