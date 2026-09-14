@@ -1,4 +1,4 @@
-import { Innertube } from "youtubei.js/cf-worker";
+import puppeteer from "@cloudflare/puppeteer";
 import type { Env } from "./types";
 
 export interface ResolvedAudio {
@@ -8,61 +8,81 @@ export interface ResolvedAudio {
   approxDurationMs?: number;
 }
 
-type PlaybackClient = "VISIONOS" | "ANDROID_VR" | "ANDROID" | "IOS" | "WEB";
-
-function playbackClients(env: Env): PlaybackClient[] {
-  const preferred = (env.YOUTUBE_INNERTUBE_CLIENT || "VISIONOS").toUpperCase() as PlaybackClient;
-  const known: PlaybackClient[] = ["VISIONOS", "ANDROID_VR", "ANDROID", "IOS", "WEB"];
-  return [preferred, ...known].filter(
-    (client, index, all): client is PlaybackClient => known.includes(client) && all.indexOf(client) === index,
-  );
+function isGoogleVideoAudioUrl(rawUrl: string): boolean {
+  try {
+    const url = new URL(rawUrl);
+    if (!url.hostname.endsWith(".googlevideo.com")) return false;
+    if (!url.pathname.includes("videoplayback")) return false;
+    return (url.searchParams.get("mime") || "").startsWith("audio/");
+  } catch {
+    return false;
+  }
 }
 
-function errorMessage(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
+function parseNumber(value: string | null): number | undefined {
+  if (!value) return undefined;
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : undefined;
 }
 
 /**
- * Resolve a short-lived, deciphered YouTube audio URL without proxying the media
- * through the Worker. The URL is handed directly to Groq.
+ * Resolve a short-lived YouTube audio media URL by letting Cloudflare Browser Run
+ * execute YouTube's own player code. This avoids doing player JS parsing / decipher
+ * work inside the 10 ms CPU budget of a Free Worker.
  *
- * YouTube playback requirements change frequently, and a client that works one
- * day may temporarily stop returning streamingData. Try a small ordered set of
- * InnerTube clients before declaring the resolver unavailable. Optional PO-token
- * and visitor-data secrets remain supported for future YouTube restrictions.
+ * The Worker never proxies media bytes. It only observes the first anonymous
+ * googlevideo audio request made by the browser and hands that signed URL to Groq.
  */
 export async function resolveYouTubeAudioUrl(env: Env, videoId: string): Promise<ResolvedAudio> {
-  const youtube = await Innertube.create({
-    generate_session_locally: true,
-    ...(env.YOUTUBE_PO_TOKEN ? { po_token: env.YOUTUBE_PO_TOKEN } : {}),
-    ...(env.YOUTUBE_VISITOR_DATA ? { visitor_data: env.YOUTUBE_VISITOR_DATA } : {}),
-  });
+  const browser = await puppeteer.launch(env.BROWSER);
+  try {
+    const page = await browser.newPage();
+    await page.setUserAgent(
+      "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 " +
+        "(KHTML, like Gecko) Chrome/153.0.0.0 Safari/537.36",
+    );
 
-  const failures: string[] = [];
-  for (const client of playbackClients(env)) {
+    const audioRequestPromise = page.waitForRequest(
+      (request) => isGoogleVideoAudioUrl(request.url()),
+      { timeout: 20_000 },
+    );
+
+    await page.goto(`https://www.youtube.com/watch?v=${encodeURIComponent(videoId)}`, {
+      waitUntil: "domcontentloaded",
+      timeout: 20_000,
+    });
+
+    // YouTube commonly starts fetching media during page initialization. If it
+    // does not, issue an explicit play gesture to trigger the first audio range.
     try {
-      const format = await youtube.getStreamingData(videoId, {
-        type: "audio",
-        quality: "best",
-        format: "any",
-        client,
-      });
-
-      if (!format?.url) {
-        failures.push(`${client}: no playable URL returned`);
-        continue;
+      await page.waitForSelector("video", { timeout: 5_000 });
+      await page.click(".ytp-play-button", { delay: 20 });
+    } catch {
+      try {
+        await page.evaluate(() => {
+          const video = document.querySelector("video") as HTMLVideoElement | null;
+          if (video) void video.play().catch(() => undefined);
+        });
+      } catch {
+        // The pending request promise below remains the source of truth.
       }
-
-      return {
-        url: format.url,
-        mimeType: format.mime_type,
-        bitrate: format.bitrate,
-        approxDurationMs: format.approx_duration_ms,
-      };
-    } catch (error) {
-      failures.push(`${client}: ${errorMessage(error)}`);
     }
-  }
 
-  throw new Error(`YouTube audio resolver exhausted playback clients for ${videoId}: ${failures.join(" | ")}`);
+    const request = await audioRequestPromise;
+    const rawUrl = request.url();
+    const url = new URL(rawUrl);
+    const durationSeconds = parseNumber(url.searchParams.get("dur"));
+
+    return {
+      url: rawUrl,
+      mimeType: url.searchParams.get("mime") || undefined,
+      bitrate: parseNumber(url.searchParams.get("ratebypass")),
+      approxDurationMs: durationSeconds !== undefined ? durationSeconds * 1000 : undefined,
+    };
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    throw new Error(`Browser Run did not observe a YouTube audio request for ${videoId}: ${message}`);
+  } finally {
+    await browser.close();
+  }
 }
