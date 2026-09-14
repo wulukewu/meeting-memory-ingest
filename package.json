@@ -1,0 +1,22 @@
+{
+  "name": "meeting-memory-ingest",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Cloudflare Worker that turns queued YouTube meetings into AI-readable references in ai-memory.",
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "youtube:auth": "node scripts/youtube-oauth.mjs"
+  },
+  "dependencies": {
+    "youtubei.js": "18.0.0"
+  },
+  "devDependencies": {
+    "typescript": "^5.9.0",
+    "vitest": "^4.0.0",
+    "wrangler": "^4.0.0"
+  }
+}
