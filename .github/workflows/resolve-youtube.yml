@@ -68,9 +68,9 @@ jobs:
           fi
 
           ERR_FILE="$(mktemp)"
-          SOURCE_FILE="/tmp/meeting-source.bin"
+          SOURCE_PREFIX="/tmp/meeting-source"
+          SOURCE_FILE=""
           UPLOAD_FILE="/tmp/meeting-upload.ogg"
-          AUDIO_URL=""
           PAYLOAD=""
           UPLOAD_READY=0
           WG_UP=0
@@ -118,105 +118,80 @@ jobs:
           else
             echo "WireGuard public IPv4 egress changed successfully."
 
-            resolve_with_client() {
+            download_with_client() {
               local clients="$1"
+              rm -f "${SOURCE_PREFIX}".*
+              SOURCE_FILE=""
               : > "$ERR_FILE"
+
+              echo "Downloading format 140 with yt-dlp native 8 MB HTTP chunks (client=${clients})."
               set +e
-              AUDIO_URL="$(yt-dlp \
+              yt-dlp \
                 --no-playlist \
                 --js-runtimes node \
                 --extractor-args "youtube:player_client=${clients}" \
                 --format '140/bestaudio[ext=m4a]/bestaudio' \
-                --get-url \
+                --http-chunk-size 8M \
+                --throttled-rate 100K \
+                --retries 5 \
+                --socket-timeout 30 \
+                --newline \
+                --output "${SOURCE_PREFIX}.%(ext)s" \
                 "https://www.youtube.com/watch?v=${VIDEO_ID}" \
-                2>"$ERR_FILE")"
+                2> >(tee "$ERR_FILE" >&2)
               local rc=$?
               set -e
-              AUDIO_URL="$(printf '%s\n' "$AUDIO_URL" | sed -n '1p')"
-              [[ $rc -eq 0 && "$AUDIO_URL" == https://* ]]
+
+              SOURCE_FILE="$(find /tmp -maxdepth 1 -type f -name 'meeting-source.*' ! -name '*.part' -print -quit)"
+              [[ $rc -eq 0 && -n "$SOURCE_FILE" && -s "$SOURCE_FILE" ]]
             }
 
             set -e
-            if ! resolve_with_client "visionos"; then
-              if ! resolve_with_client "default,web_embedded"; then
+            if ! download_with_client "visionos"; then
+              echo "visionos download failed; retrying with fallback YouTube clients."
+              if ! download_with_client "default,web_embedded"; then
                 ERROR_TEXT="$(tail -c 1200 "$ERR_FILE" | tr '\r\n' '  ' | sed 's/[[:space:]]\+/ /g')"
                 PAYLOAD="$(jq -n \
                   --arg videoId "$VIDEO_ID" \
-                  --arg error "yt-dlp could not resolve audio through WireGuard: ${ERROR_TEXT}" \
+                  --arg error "yt-dlp could not download audio through WireGuard: ${ERROR_TEXT}" \
                   '{videoId:$videoId,error:$error}')"
               fi
             fi
 
-            if [[ -n "$AUDIO_URL" ]]; then
-              echo "::add-mask::$AUDIO_URL"
-              PROBE_META="$(curl -sS -L --max-time 20 --range 0-0 -o /dev/null \
-                -w '%{url_effective}\n%{http_code}\n%{content_type}' "$AUDIO_URL" || true)"
-              FINAL_URL="$(printf '%s\n' "$PROBE_META" | sed -n '1p')"
-              FINAL_STATUS="$(printf '%s\n' "$PROBE_META" | sed -n '2p')"
-              FINAL_TYPE="$(printf '%s\n' "$PROBE_META" | sed -n '3p')"
+            if [[ -z "$PAYLOAD" && -n "$SOURCE_FILE" && -s "$SOURCE_FILE" ]]; then
+              SOURCE_BYTES="$(stat -c%s "$SOURCE_FILE")"
+              echo "Downloaded source audio through WireGuard (${SOURCE_BYTES} bytes)."
+              echo "Compressing meeting audio for Groq direct upload."
 
-              if [[ "$FINAL_URL" == https://* ]]; then
-                echo "::add-mask::$FINAL_URL"
-              fi
-
-              if [[ "$FINAL_STATUS" =~ ^2 && "$FINAL_URL" == https://* ]]; then
-                AUDIO_URL="$FINAL_URL"
-                echo "Resolved final media URL through WireGuard (HTTP ${FINAL_STATUS}, type ${FINAL_TYPE:-unknown})."
-              else
-                AUDIO_URL=""
-                PAYLOAD="$(jq -n \
-                  --arg videoId "$VIDEO_ID" \
-                  --arg error "yt-dlp returned a media URL, but following redirects through WireGuard did not reach a final 2xx media response (HTTP ${FINAL_STATUS:-unknown})" \
-                  '{videoId:$videoId,error:$error}')"
-              fi
-            fi
-
-            if [[ -z "$PAYLOAD" && -n "$AUDIO_URL" ]]; then
-              echo "Downloading source audio while the WireGuard egress is active."
               set +e
-              curl -fL --retry 2 --retry-all-errors --connect-timeout 15 --max-time 900 \
-                -o "$SOURCE_FILE" "$AUDIO_URL"
-              DOWNLOAD_RC=$?
+              ffmpeg -nostdin -hide_banner -loglevel error -y \
+                -i "$SOURCE_FILE" -vn -map 0:a:0 -ac 1 -ar 16000 \
+                -c:a libopus -b:a 24k -application voip "$UPLOAD_FILE"
+              FFMPEG_RC=$?
               set -e
 
-              if [[ $DOWNLOAD_RC -ne 0 || ! -s "$SOURCE_FILE" ]]; then
+              if [[ $FFMPEG_RC -ne 0 || ! -s "$UPLOAD_FILE" ]]; then
                 PAYLOAD="$(jq -n \
                   --arg videoId "$VIDEO_ID" \
-                  --arg error "resolved media URL could not be downloaded through the WireGuard egress" \
+                  --arg error "ffmpeg could not prepare the meeting audio for transcription" \
                   '{videoId:$videoId,error:$error}')"
               else
-                echo "Compressing meeting audio for Groq direct upload."
-                set +e
-                ffmpeg -nostdin -hide_banner -loglevel error -y \
-                  -i "$SOURCE_FILE" -vn -map 0:a:0 -ac 1 -ar 16000 \
-                  -c:a libopus -b:a 24k -application voip "$UPLOAD_FILE"
-                FFMPEG_RC=$?
-                set -e
-
-                if [[ $FFMPEG_RC -ne 0 || ! -s "$UPLOAD_FILE" ]]; then
+                UPLOAD_BYTES="$(stat -c%s "$UPLOAD_FILE")"
+                if (( UPLOAD_BYTES > 24000000 )); then
                   PAYLOAD="$(jq -n \
                     --arg videoId "$VIDEO_ID" \
-                    --arg error "ffmpeg could not prepare the meeting audio for transcription" \
+                    --arg error "compressed meeting audio is ${UPLOAD_BYTES} bytes, above the 24 MB upload safety limit" \
                     '{videoId:$videoId,error:$error}')"
                 else
-                  UPLOAD_BYTES="$(stat -c%s "$UPLOAD_FILE")"
-                  if (( UPLOAD_BYTES > 24000000 )); then
-                    PAYLOAD="$(jq -n \
-                      --arg videoId "$VIDEO_ID" \
-                      --arg error "compressed meeting audio is ${UPLOAD_BYTES} bytes, above the 24 MB safety limit for Groq free-tier upload" \
-                      '{videoId:$videoId,error:$error}')"
-                  else
-                    echo "Prepared compressed audio for direct Groq upload (${UPLOAD_BYTES} bytes)."
-                    UPLOAD_READY=1
-                  fi
+                  echo "Prepared compressed audio for direct Groq upload (${UPLOAD_BYTES} bytes)."
+                  UPLOAD_READY=1
                 fi
               fi
             fi
           fi
 
-          # The YouTube media is now local; restore normal runner egress before
-          # uploading it to the Worker. The Worker keeps GROQ_API_KEY private and
-          # streams this multipart body directly to Groq without buffering audio.
+          # YouTube access is finished. Restore the runner's normal egress before
+          # uploading the small compressed file to the Worker/Groq pipeline.
           cleanup_wg
           trap - EXIT
 
