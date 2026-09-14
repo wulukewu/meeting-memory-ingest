@@ -207,7 +207,8 @@ jobs:
               -F "model=${TRANSCRIPTION_MODEL}" \
               -F 'response_format=verbose_json' \
               -F 'timestamp_granularities[]=segment' \
-              -F 'prompt=繁體中文會議，可能混用英文技術名詞。保留英文技術詞、程式名稱與人名原文。' \
+              -F 'language=zh' \
+              -F 'temperature=0' \
               "$TRANSCRIBE_URL")"
           else
             if [[ -z "$PAYLOAD" ]]; then
