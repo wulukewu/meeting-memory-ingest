@@ -1,6 +1,6 @@
 import type { Env, ScheduledController, WaitUntilContext } from "./types";
 import { loadManifest, resetVideo } from "./github";
-import { runPlaylist, runSingleVideo } from "./pipeline";
+import { handleResolverCallback, runPlaylist, runSingleVideo } from "./pipeline";
 import { jsonResponse } from "./util";
 
 function isAdmin(request: Request, env: Env): boolean {
@@ -16,9 +16,13 @@ function configStatus(env: Env) {
     "YOUTUBE_REFRESH_TOKEN",
     "GITHUB_TOKEN",
     "ADMIN_TOKEN",
+    "RESOLVER_GITHUB_TOKEN",
   ] as const;
   const missingSecrets = requiredSecrets.filter((key) => !env[key]);
-  const missingVars = !env.YOUTUBE_PLAYLIST_ID ? ["YOUTUBE_PLAYLIST_ID"] : [];
+  const missingVars = [
+    ...(env.YOUTUBE_PLAYLIST_ID ? [] : ["YOUTUBE_PLAYLIST_ID"]),
+    ...(env.WORKER_PUBLIC_URL ? [] : ["WORKER_PUBLIC_URL"]),
+  ];
   return { configured: missingSecrets.length === 0 && missingVars.length === 0, missingSecrets, missingVars };
 }
 
@@ -30,6 +34,17 @@ async function handleFetch(request: Request, env: Env, ctx: WaitUntilContext): P
   }
 
   if (!isAdmin(request, env)) return jsonResponse({ error: "unauthorized" }, 401);
+
+  if (request.method === "POST" && url.pathname === "/resolver/callback") {
+    const payload = (await request.json()) as { videoId?: string; audioUrl?: string; error?: string };
+    if (!payload.videoId) return jsonResponse({ error: "missing videoId" }, 400);
+    const result = await handleResolverCallback(env, {
+      videoId: payload.videoId,
+      ...(payload.audioUrl ? { audioUrl: payload.audioUrl } : {}),
+      ...(payload.error ? { error: payload.error } : {}),
+    });
+    return jsonResponse(result);
+  }
 
   if (request.method === "GET" && url.pathname === "/status") {
     const { manifest } = await loadManifest(env);
