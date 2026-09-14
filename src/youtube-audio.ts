@@ -8,13 +8,20 @@ export interface ResolvedAudio {
   approxDurationMs?: number;
 }
 
-interface BrowserAttemptDiagnostic {
-  target: string;
+interface BrowserDiagnostic {
   finalUrl: string;
   title: string;
   hasVideo: boolean;
+  currentTime?: number;
+  duration?: number;
   body: string;
-  media: string[];
+  mediaCount: number;
+}
+
+interface ProbeDiagnostic {
+  status?: number;
+  contentType?: string;
+  error?: string;
 }
 
 function parseNumber(value: string | null): number | undefined {
@@ -23,211 +30,197 @@ function parseNumber(value: string | null): number | undefined {
   return Number.isFinite(parsed) ? parsed : undefined;
 }
 
-function compactDiagnostic(value: BrowserAttemptDiagnostic): string {
+function compactBrowserDiagnostic(value: BrowserDiagnostic): string {
   const body = value.body.replace(/\s+/g, " ").trim().slice(0, 220);
-  const media = value.media.slice(0, 8).join(", ") || "none";
-  return `${value.target} -> ${value.finalUrl} title=${JSON.stringify(value.title)} video=${value.hasVideo} media=[${media}] body=${JSON.stringify(body)}`;
+  return `url=${value.finalUrl} title=${JSON.stringify(value.title)} video=${value.hasVideo} currentTime=${value.currentTime ?? "?"} duration=${value.duration ?? "?"} mediaCount=${value.mediaCount} body=${JSON.stringify(body)}`;
+}
+
+async function probeContentType(rawUrl: string): Promise<{ contentType?: string; status?: number; error?: string }> {
+  try {
+    const response = await fetch(rawUrl, {
+      method: "GET",
+      headers: {
+        range: "bytes=0-0",
+      },
+      redirect: "follow",
+    });
+    const contentType = response.headers.get("content-type")?.split(";", 1)[0]?.trim().toLowerCase() || undefined;
+    const status = response.status;
+    await response.body?.cancel().catch(() => undefined);
+    return { contentType, status };
+  } catch (error) {
+    return { error: error instanceof Error ? error.message : String(error) };
+  }
 }
 
 /**
- * Resolve a short-lived YouTube audio media URL by letting Cloudflare Browser Run
- * execute YouTube's own player code. This avoids player parsing / decipher work
- * inside the Free Worker's small CPU budget.
+ * Resolve a short-lived YouTube audio media URL without parsing YouTube player JS
+ * in the Worker isolate.
  *
- * The resolver prefers the lightweight embed player, then falls back to the normal
- * watch page. Resource filtering executes inside Chromium. No signed media bytes
- * are proxied through the Worker; only the final URL is returned to Groq.
+ * Browser Run executes the real anonymous YouTube watch page and exposes the signed
+ * googlevideo resource URLs through PerformanceResourceTiming. Those URLs do not
+ * always expose `mime` or `itag` query parameters, so the Worker classifies only a
+ * handful of candidate URLs with a one-byte HTTP Range request and selects the one
+ * whose response Content-Type is audio/*.
+ *
+ * Browser work is kept short and all media bytes still bypass the Worker: the final
+ * signed audio URL is handed directly to Groq.
  */
 export async function resolveYouTubeAudioUrl(env: Env, videoId: string): Promise<ResolvedAudio> {
   const browser = await puppeteer.launch(env.BROWSER);
-  const diagnostics: BrowserAttemptDiagnostic[] = [];
+  let candidates: string[] = [];
+  let browserDiagnostic: BrowserDiagnostic | undefined;
 
   try {
     const page = await browser.newPage();
+    const target = `https://www.youtube.com/watch?v=${encodeURIComponent(videoId)}`;
 
-    // Keep Browser Run's native Chromium UA. Spoofing a newer/different Chrome UA
-    // than the actual browser can make YouTube serve an incompatible player path.
-    const targets = [
-      `https://www.youtube.com/embed/${encodeURIComponent(videoId)}?autoplay=1&playsinline=1&rel=0`,
-      `https://www.youtube-nocookie.com/embed/${encodeURIComponent(videoId)}?autoplay=1&playsinline=1&rel=0`,
-      `https://www.youtube.com/watch?v=${encodeURIComponent(videoId)}`,
-    ];
-
-    for (const target of targets) {
-      await page.evaluate(() => performance.clearResourceTimings()).catch(() => undefined);
-
-      try {
-        await page.goto(target, {
-          waitUntil: "domcontentloaded",
-          timeout: 15_000,
-        });
-      } catch {
-        // A navigation timeout does not necessarily mean the player is unusable.
-        // Continue with the page state Chromium already has.
-      }
-
-      // Handle the common anonymous YouTube consent interstitial when it appears.
-      await page
-        .evaluate(() => {
-          const labels = ["accept all", "i agree", "reject all", "accept", "agree"];
-          const buttons = Array.from(document.querySelectorAll("button"));
-          const button = buttons.find((candidate) => {
-            const text = (candidate.textContent || "").trim().toLowerCase();
-            return labels.some((label) => text === label || text.includes(label));
-          }) as HTMLButtonElement | undefined;
-          if (button) button.click();
-          return Boolean(button);
-        })
-        .catch(() => false);
-
-      // Trigger playback with a browser-side user gesture first, then a direct
-      // HTMLMediaElement play() fallback. Embed pages often expose the large play
-      // button while watch pages expose the normal control button.
-      for (const selector of [".ytp-large-play-button", ".ytp-play-button"]) {
-        try {
-          const element = await page.$(selector);
-          if (element) {
-            await element.click();
-            break;
-          }
-        } catch {
-          // Try the next playback method.
-        }
-      }
-
-      await page
-        .evaluate(() => {
-          const video = document.querySelector("video") as HTMLVideoElement | null;
-          if (!video) return false;
-          video.muted = false;
-          video.volume = 1;
-          void video.play().catch(() => undefined);
-          return true;
-        })
-        .catch(() => false);
-
-      // YouTube normally uses adaptive audio-only formats. Accept either an
-      // explicit audio MIME type or a known audio-only itag because some playback
-      // URLs omit the MIME query parameter.
-      try {
-        await page.waitForFunction(
-          () => {
-            const audioItags = new Set([
-              "139",
-              "140",
-              "141",
-              "249",
-              "250",
-              "251",
-              "256",
-              "258",
-              "325",
-              "328",
-              "599",
-              "600",
-            ]);
-            return performance.getEntriesByType("resource").some((entry) => {
-              try {
-                const url = new URL(entry.name);
-                if (!url.hostname.endsWith(".googlevideo.com") || !url.pathname.includes("videoplayback")) return false;
-                const mime = url.searchParams.get("mime") || "";
-                const itag = url.searchParams.get("itag") || "";
-                return mime.startsWith("audio/") || audioItags.has(itag);
-              } catch {
-                return false;
-              }
-            });
-          },
-          { timeout: 9_000, polling: 250 },
-        );
-      } catch {
-        // Capture a safe diagnostic below and try the next page variant.
-      }
-
-      const rawUrl = await page
-        .evaluate(() => {
-          const audioItags = new Set([
-            "139",
-            "140",
-            "141",
-            "249",
-            "250",
-            "251",
-            "256",
-            "258",
-            "325",
-            "328",
-            "599",
-            "600",
-          ]);
-          for (const entry of performance.getEntriesByType("resource")) {
-            try {
-              const url = new URL(entry.name);
-              if (!url.hostname.endsWith(".googlevideo.com") || !url.pathname.includes("videoplayback")) continue;
-              const mime = url.searchParams.get("mime") || "";
-              const itag = url.searchParams.get("itag") || "";
-              if (mime.startsWith("audio/") || audioItags.has(itag)) return entry.name;
-            } catch {
-              // Ignore non-URL resource entries.
-            }
-          }
-          return null;
-        })
-        .catch(() => null);
-
-      if (rawUrl) {
-        const url = new URL(rawUrl);
-        const durationSeconds = parseNumber(url.searchParams.get("dur"));
-        return {
-          url: rawUrl,
-          mimeType: url.searchParams.get("mime") || undefined,
-          approxDurationMs: durationSeconds !== undefined ? durationSeconds * 1000 : undefined,
-        };
-      }
-
-      const diagnostic = await page
-        .evaluate((attemptTarget) => {
-          const media = performance
-            .getEntriesByType("resource")
-            .map((entry) => entry.name)
-            .filter((name) => {
-              try {
-                const url = new URL(name);
-                return url.hostname.endsWith(".googlevideo.com") && url.pathname.includes("videoplayback");
-              } catch {
-                return false;
-              }
-            })
-            .slice(0, 12)
-            .map((name) => {
-              const url = new URL(name);
-              return `itag=${url.searchParams.get("itag") || "?"};mime=${url.searchParams.get("mime") || "?"}`;
-            });
-          return {
-            target: attemptTarget,
-            finalUrl: location.href,
-            title: document.title,
-            hasVideo: Boolean(document.querySelector("video")),
-            body: (document.body?.innerText || "").slice(0, 500),
-            media,
-          };
-        }, target)
-        .catch(() => ({
-          target,
-          finalUrl: "unknown",
-          title: "unknown",
-          hasVideo: false,
-          body: "diagnostic unavailable",
-          media: [],
-        }));
-      diagnostics.push(diagnostic as BrowserAttemptDiagnostic);
+    try {
+      await page.goto(target, {
+        waitUntil: "domcontentloaded",
+        timeout: 15_000,
+      });
+    } catch {
+      // A navigation timeout can still leave a fully usable player behind.
     }
 
-    throw new Error(`no audio media URL found; ${diagnostics.map(compactDiagnostic).join(" || ")}`);
-  } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
-    throw new Error(`Browser Run did not observe a YouTube audio resource for ${videoId}: ${message}`);
+    // Handle the common anonymous YouTube consent interstitial when present.
+    await page
+      .evaluate(() => {
+        const labels = ["accept all", "i agree", "reject all", "accept", "agree"];
+        const button = Array.from(document.querySelectorAll("button")).find((candidate) => {
+          const text = (candidate.textContent || "").trim().toLowerCase();
+          return labels.some((label) => text === label || text.includes(label));
+        }) as HTMLButtonElement | undefined;
+        if (button) button.click();
+        return Boolean(button);
+      })
+      .catch(() => false);
+
+    // Trigger playback. The watch page has already proven usable in Browser Run;
+    // either the native play button or HTMLMediaElement.play() is sufficient.
+    try {
+      const button = await page.$(".ytp-play-button");
+      if (button) await button.click();
+    } catch {
+      // Direct play() below is the fallback.
+    }
+
+    await page
+      .evaluate(() => {
+        const video = document.querySelector("video") as HTMLVideoElement | null;
+        if (!video) return false;
+        void video.play().catch(() => undefined);
+        return true;
+      })
+      .catch(() => false);
+
+    // Wait only for any googlevideo media resources. Classification happens later
+    // using HTTP response headers because Resource Timing can omit mime/itag params.
+    try {
+      await page.waitForFunction(
+        () =>
+          performance.getEntriesByType("resource").some((entry) => {
+            try {
+              const url = new URL(entry.name);
+              return url.hostname.endsWith(".googlevideo.com") && url.pathname.includes("videoplayback");
+            } catch {
+              return false;
+            }
+          }),
+        { timeout: 10_000, polling: 250 },
+      );
+    } catch {
+      // Diagnostics below will explain whether playback actually started.
+    }
+
+    candidates = await page
+      .evaluate(() => {
+        const urls: string[] = [];
+        const seen = new Set<string>();
+        for (const entry of performance.getEntriesByType("resource")) {
+          try {
+            const url = new URL(entry.name);
+            if (!url.hostname.endsWith(".googlevideo.com") || !url.pathname.includes("videoplayback")) continue;
+            if (seen.has(entry.name)) continue;
+            seen.add(entry.name);
+            urls.push(entry.name);
+            if (urls.length >= 12) break;
+          } catch {
+            // Ignore non-URL entries.
+          }
+        }
+        return urls;
+      })
+      .catch(() => [] as string[]);
+
+    browserDiagnostic = await page
+      .evaluate(() => {
+        const video = document.querySelector("video") as HTMLVideoElement | null;
+        const mediaCount = performance.getEntriesByType("resource").filter((entry) => {
+          try {
+            const url = new URL(entry.name);
+            return url.hostname.endsWith(".googlevideo.com") && url.pathname.includes("videoplayback");
+          } catch {
+            return false;
+          }
+        }).length;
+        return {
+          finalUrl: location.href,
+          title: document.title,
+          hasVideo: Boolean(video),
+          currentTime: video && Number.isFinite(video.currentTime) ? video.currentTime : undefined,
+          duration: video && Number.isFinite(video.duration) ? video.duration : undefined,
+          body: (document.body?.innerText || "").slice(0, 500),
+          mediaCount,
+        };
+      })
+      .catch(() => ({
+        finalUrl: "unknown",
+        title: "unknown",
+        hasVideo: false,
+        body: "diagnostic unavailable",
+        mediaCount: candidates.length,
+      }));
   } finally {
     await browser.close();
   }
+
+  if (candidates.length === 0) {
+    throw new Error(
+      `Browser Run observed no googlevideo media resources for ${videoId}; ${
+        browserDiagnostic ? compactBrowserDiagnostic(browserDiagnostic) : "browser diagnostic unavailable"
+      }`,
+    );
+  }
+
+  const probes: ProbeDiagnostic[] = [];
+  for (const candidate of candidates) {
+    const probe = await probeContentType(candidate);
+    probes.push(probe);
+    if (probe.contentType?.startsWith("audio/")) {
+      const url = new URL(candidate);
+      const durationSeconds = parseNumber(url.searchParams.get("dur"));
+      return {
+        url: candidate,
+        mimeType: probe.contentType,
+        approxDurationMs: durationSeconds !== undefined ? durationSeconds * 1000 : undefined,
+      };
+    }
+  }
+
+  const probeSummary = probes
+    .slice(0, 12)
+    .map((probe, index) =>
+      probe.error
+        ? `#${index + 1}:error=${JSON.stringify(probe.error.slice(0, 100))}`
+        : `#${index + 1}:status=${probe.status ?? "?"};type=${probe.contentType || "?"}`,
+    )
+    .join(", ");
+
+  throw new Error(
+    `Browser Run found ${candidates.length} googlevideo media resources for ${videoId}, but none probed as audio; ${probeSummary}; ${
+      browserDiagnostic ? compactBrowserDiagnostic(browserDiagnostic) : "browser diagnostic unavailable"
+    }`,
+  );
 }
