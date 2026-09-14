@@ -1,6 +1,6 @@
 import type { Env, ScheduledController, WaitUntilContext } from "./types";
 import { loadManifest, resetVideo } from "./github";
-import { handleResolverCallback, runPlaylist, runSingleVideo } from "./pipeline";
+import { handleResolverCallback, handleResolverTranscription, runPlaylist, runSingleVideo } from "./pipeline";
 import { jsonResponse } from "./util";
 
 function isAdmin(request: Request, env: Env): boolean {
@@ -51,6 +51,19 @@ async function handleFetch(request: Request, env: Env, ctx: WaitUntilContext): P
 
   const notConfigured = configError(env);
   if (notConfigured) return notConfigured;
+
+  if (request.method === "POST" && url.pathname === "/resolver/transcribe") {
+    const videoId = request.headers.get("x-video-id")?.trim() || "";
+    if (!/^[A-Za-z0-9_-]{6,20}$/.test(videoId)) return jsonResponse({ error: "invalid or missing x-video-id" }, 400);
+    const contentType = request.headers.get("content-type") || "";
+    if (!contentType.toLowerCase().startsWith("multipart/form-data;")) {
+      return jsonResponse({ error: "resolver transcription upload must use multipart/form-data" }, 415);
+    }
+    if (!request.body) return jsonResponse({ error: "missing transcription upload body" }, 400);
+
+    const result = await handleResolverTranscription(env, videoId, request.body, contentType);
+    return jsonResponse(result, result.status === "completed" ? 200 : 500);
+  }
 
   if (request.method === "POST" && url.pathname === "/resolver/callback") {
     const payload = (await request.json()) as { videoId?: string; audioUrl?: string; error?: string };

@@ -34,29 +34,12 @@ async function groqFetch(env: Env, path: string, init: RequestInit, maxAttempts 
   throw new Error(lastError);
 }
 
-export async function transcribeAudioUrl(
-  env: Env,
-  audioUrl: string,
-  video: VideoRecord,
-): Promise<TranscriptResult> {
-  const form = new FormData();
-  form.set("url", audioUrl);
-  form.set("model", env.GROQ_TRANSCRIPTION_MODEL || "whisper-large-v3");
-  form.set("response_format", "verbose_json");
-  form.append("timestamp_granularities[]", "segment");
-  form.set(
-    "prompt",
-    truncate(`繁體中文會議，可能混用英文技術名詞。保留英文技術詞、程式名稱與人名原文。影片標題：${video.title}`, 180),
-  );
-
-  const response = await groqFetch(env, "audio/transcriptions", { method: "POST", body: form }, 3);
-  const raw = (await response.json()) as {
-    text?: string;
-    language?: string;
-    duration?: number;
-    segments?: Array<{ id?: number; start?: number; end?: number; text?: string }>;
-  };
-
+function normalizeTranscript(raw: {
+  text?: string;
+  language?: string;
+  duration?: number;
+  segments?: Array<{ id?: number; start?: number; end?: number; text?: string }>;
+}): TranscriptResult {
   const segments: TranscriptSegment[] = (raw.segments || [])
     .filter((segment) => typeof segment.start === "number" && typeof segment.end === "number" && segment.text)
     .map((segment) => ({
@@ -73,6 +56,51 @@ export async function transcribeAudioUrl(
     duration: raw.duration,
     segments,
   };
+}
+
+export async function transcribeAudioUrl(
+  env: Env,
+  audioUrl: string,
+  video: VideoRecord,
+): Promise<TranscriptResult> {
+  const form = new FormData();
+  form.set("url", audioUrl);
+  form.set("model", env.GROQ_TRANSCRIPTION_MODEL || "whisper-large-v3");
+  form.set("response_format", "verbose_json");
+  form.append("timestamp_granularities[]", "segment");
+  form.set(
+    "prompt",
+    truncate(`繁體中文會議，可能混用英文技術名詞。保留英文技術詞、程式名稱與人名原文。影片標題：${video.title}`, 180),
+  );
+
+  const response = await groqFetch(env, "audio/transcriptions", { method: "POST", body: form }, 3);
+  return normalizeTranscript(await response.json());
+}
+
+export async function transcribeAudioUpload(
+  env: Env,
+  body: BodyInit,
+  contentType: string,
+): Promise<TranscriptResult> {
+  if (!contentType.toLowerCase().startsWith("multipart/form-data;")) {
+    throw new Error("resolver transcription upload must use multipart/form-data");
+  }
+
+  // The incoming multipart stream is intentionally forwarded without parsing or
+  // buffering the audio in the Worker. A request stream cannot be replayed, so
+  // this path performs one Groq attempt; the resolver workflow can retry the
+  // whole upload if a transient failure occurs.
+  const response = await groqFetch(
+    env,
+    "audio/transcriptions",
+    {
+      method: "POST",
+      headers: { "content-type": contentType },
+      body,
+    },
+    1,
+  );
+  return normalizeTranscript(await response.json());
 }
 
 interface PartialSummary {

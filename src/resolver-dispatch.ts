@@ -24,6 +24,7 @@ export async function dispatchYouTubeResolver(env: Env, videoId: string): Promis
       inputs: {
         video_id: videoId,
         callback_url: callbackUrl(env),
+        transcription_model: env.GROQ_TRANSCRIPTION_MODEL || "whisper-large-v3",
       },
     }),
   });
