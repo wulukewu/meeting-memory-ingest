@@ -18,7 +18,7 @@ function configStatus(env: Env) {
     "ADMIN_TOKEN",
   ] as const;
   const missingSecrets = requiredSecrets.filter((key) => !env[key]);
-  const missingVars = !env.YOUTUBE_PLAYLIST_ID || env.YOUTUBE_PLAYLIST_ID === "REPLACE_ME" ? ["YOUTUBE_PLAYLIST_ID"] : [];
+  const missingVars = !env.YOUTUBE_PLAYLIST_ID ? ["YOUTUBE_PLAYLIST_ID"] : [];
   return { configured: missingSecrets.length === 0 && missingVars.length === 0, missingSecrets, missingVars };
 }
 
