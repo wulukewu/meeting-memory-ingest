@@ -11,6 +11,7 @@ export interface Env {
 
   // Wrangler vars
   YOUTUBE_PLAYLIST_ID: string;
+  YOUTUBE_INNERTUBE_CLIENT: string;
   AI_MEMORY_OWNER: string;
   AI_MEMORY_REPO: string;
   AI_MEMORY_BRANCH: string;
