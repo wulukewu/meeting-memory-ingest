@@ -85,18 +85,22 @@ interface PartialSummary {
 
 async function chatJson<T>(
   env: Env,
-  system: string,
+  instructions: string,
   user: string,
   maxTokens = 1600,
 ): Promise<T> {
   const body = {
     model: env.GROQ_SUMMARY_MODEL || "openai/gpt-oss-120b",
     temperature: 0.1,
-    max_tokens: maxTokens,
+    max_completion_tokens: maxTokens,
+    reasoning_effort: "low",
+    reasoning_format: "hidden",
     response_format: { type: "json_object" },
     messages: [
-      { role: "system", content: system },
-      { role: "user", content: user },
+      {
+        role: "user",
+        content: `${instructions}\n\n${user}`,
+      },
     ],
   };
   const response = await groqFetch(env, "chat/completions", {
@@ -166,7 +170,7 @@ export async function summarizeMeeting(
     const partial = await chatJson<PartialSummary>(
       env,
       [
-        "你正在整理會議逐字稿。只輸出 JSON，不要 Markdown。",
+        "你正在整理會議逐字稿。只輸出有效 JSON，不要 Markdown。",
         "不要把不確定的內容補猜成事實。保留技術名詞、人名與時間戳。",
         "JSON keys 必須是 summary, decisions, actionItems, topics, tags。",
         "actionItems 元素格式 {owner?: string, task: string}；topics 元素格式 {timestamp?: string, topic: string}。",
@@ -180,7 +184,7 @@ export async function summarizeMeeting(
   const final = await chatJson<MeetingSummary>(
     env,
     [
-      "你在將多段會議摘要合併成可長期查閱的會議索引。只輸出 JSON，不要 Markdown。",
+      "你在將多段會議摘要合併成可長期查閱的會議索引。只輸出有效 JSON，不要 Markdown。",
       "避免重複；不要創造逐字稿中沒有的決定、分工或姓名。",
       "category 用簡短 kebab-case；若標題明顯是 campus-agent/資工專題、演算法、MCL，優先使用 campus-agent、algorithm、mcl。",
       "JSON keys 必須是 title, category, summary, decisions, actionItems, topics, tags。",
