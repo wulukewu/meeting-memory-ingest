@@ -137,16 +137,48 @@ jobs:
 
             if [[ -n "$AUDIO_URL" ]]; then
               echo "::add-mask::$AUDIO_URL"
+              PROBE_META="$(curl -sS -L --max-time 20 --range 0-0 -o /dev/null \
+                -w '%{url_effective}\n%{http_code}\n%{content_type}' "$AUDIO_URL" || true)"
+              FINAL_URL="$(printf '%s\n' "$PROBE_META" | sed -n '1p')"
+              FINAL_STATUS="$(printf '%s\n' "$PROBE_META" | sed -n '2p')"
+              FINAL_TYPE="$(printf '%s\n' "$PROBE_META" | sed -n '3p')"
+
+              if [[ "$FINAL_URL" == https://* ]]; then
+                echo "::add-mask::$FINAL_URL"
+              fi
+
+              if [[ "$FINAL_STATUS" =~ ^2 && "$FINAL_URL" == https://* ]]; then
+                AUDIO_URL="$FINAL_URL"
+                echo "Resolved final media URL through WireGuard (HTTP ${FINAL_STATUS}, type ${FINAL_TYPE:-unknown})."
+              else
+                AUDIO_URL=""
+                PAYLOAD="$(jq -n \
+                  --arg videoId "$VIDEO_ID" \
+                  --arg error "yt-dlp returned a media URL, but following redirects through WireGuard did not reach a final 2xx media response (HTTP ${FINAL_STATUS:-unknown})" \
+                  '{videoId:$videoId,error:$error}')"
+              fi
+            fi
+          fi
+
+          # Restore the runner's normal egress before testing URL portability and callback.
+          cleanup_wg
+          trap - EXIT
+
+          if [[ -z "$PAYLOAD" && -n "$AUDIO_URL" ]]; then
+            PORTABLE_STATUS="$(curl -sS -L --max-time 20 --range 0-0 -o /dev/null -w '%{http_code}' "$AUDIO_URL" || true)"
+            if [[ "$PORTABLE_STATUS" =~ ^2 ]]; then
+              echo "Resolved final media URL is reachable outside WireGuard."
               PAYLOAD="$(jq -n \
                 --arg videoId "$VIDEO_ID" \
                 --arg audioUrl "$AUDIO_URL" \
                 '{videoId:$videoId,audioUrl:$audioUrl}')"
+            else
+              PAYLOAD="$(jq -n \
+                --arg videoId "$VIDEO_ID" \
+                --arg error "final media URL is not portable outside the WireGuard egress (HTTP ${PORTABLE_STATUS:-unknown}); the signed URL may be source-IP-bound" \
+                '{videoId:$videoId,error:$error}')"
             fi
           fi
-
-          # Restore the runner's normal egress before calling the Worker back.
-          cleanup_wg
-          trap - EXIT
 
           if [[ -z "$PAYLOAD" ]]; then
             PAYLOAD="$(jq -n \
