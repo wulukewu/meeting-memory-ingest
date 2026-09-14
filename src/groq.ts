@@ -1,4 +1,5 @@
 import type { Env, MeetingSummary, TranscriptResult, TranscriptSegment, VideoRecord } from "./types";
+import { toTaiwanTraditional } from "./traditional";
 import {
   errorMessage,
   formatTimestamp,
@@ -79,7 +80,7 @@ function normalizeTranscript(raw: {
       id: segment.id,
       start: segment.start || 0,
       end: segment.end || 0,
-      text: (segment.text || "").trim(),
+      text: toTaiwanTraditional((segment.text || "").trim()),
       avgLogprob: segment.avg_logprob,
       noSpeechProb: segment.no_speech_prob,
       compressionRatio: segment.compression_ratio,
@@ -91,7 +92,10 @@ function normalizeTranscript(raw: {
 
   if (!raw.text && rawSegments.length === 0) throw new Error("Groq returned an empty transcript");
   return {
-    text: rawSegments.length > 0 ? segments.map((segment) => segment.text).join(" ") : raw.text || "",
+    text:
+      rawSegments.length > 0
+        ? segments.map((segment) => segment.text).join(" ")
+        : toTaiwanTraditional(raw.text || ""),
     language: raw.language,
     duration: raw.duration,
     segments,
@@ -192,19 +196,26 @@ function transcriptLines(transcript: TranscriptResult): string[] {
 
 function normalizePartial(value: Partial<PartialSummary>): PartialSummary {
   return {
-    summary: typeof value.summary === "string" ? value.summary : "",
-    decisions: Array.isArray(value.decisions) ? value.decisions.filter((x): x is string => typeof x === "string") : [],
+    summary: typeof value.summary === "string" ? toTaiwanTraditional(value.summary) : "",
+    decisions: Array.isArray(value.decisions)
+      ? value.decisions.filter((x): x is string => typeof x === "string").map(toTaiwanTraditional)
+      : [],
     actionItems: Array.isArray(value.actionItems)
       ? value.actionItems
           .filter((x): x is { owner?: string; task: string } => Boolean(x && typeof x.task === "string"))
-          .map((x) => ({ owner: typeof x.owner === "string" ? x.owner : undefined, task: x.task }))
+          .map((x) => ({
+            owner: typeof x.owner === "string" ? toTaiwanTraditional(x.owner) : undefined,
+            task: toTaiwanTraditional(x.task),
+          }))
       : [],
     topics: Array.isArray(value.topics)
       ? value.topics
           .filter((x): x is { timestamp?: string; topic: string } => Boolean(x && typeof x.topic === "string"))
-          .map((x) => ({ timestamp: typeof x.timestamp === "string" ? x.timestamp : undefined, topic: x.topic }))
+          .map((x) => ({ timestamp: typeof x.timestamp === "string" ? x.timestamp : undefined, topic: toTaiwanTraditional(x.topic) }))
       : [],
-    tags: Array.isArray(value.tags) ? value.tags.filter((x): x is string => typeof x === "string") : [],
+    tags: Array.isArray(value.tags)
+      ? value.tags.filter((x): x is string => typeof x === "string").map(toTaiwanTraditional)
+      : [],
   };
 }
 
@@ -216,7 +227,7 @@ export async function summarizeMeeting(
   const fallbackCategory = inferCategoryFromTitle(video.title);
   if (!parseBoolean(env.SUMMARY_ENABLED, true)) {
     return {
-      title: video.title,
+      title: toTaiwanTraditional(video.title),
       category: fallbackCategory,
       summary: "",
       decisions: [],
@@ -236,6 +247,7 @@ export async function summarizeMeeting(
       env,
       [
         "你正在整理會議逐字稿。只輸出有效 JSON，不要 Markdown。",
+        "請以繁體中文為主；原本就是英文的技術名詞、人名、產品名、程式名稱可保留英文，不要強制翻譯。",
         "不要把不確定的內容補猜成事實。保留技術名詞、人名與時間戳。",
         "只有逐字稿中明確表達為決定或待辦的內容，才能列入 decisions/actionItems；討論中的可能性、建議與探索不要升格成待辦。",
         "JSON keys 必須是 summary, decisions, actionItems, topics, tags。",
@@ -251,6 +263,7 @@ export async function summarizeMeeting(
     env,
     [
       "你在將多段會議摘要合併成可長期查閱的會議索引。只輸出有效 JSON，不要 Markdown。",
+      "請以繁體中文為主；原本就是英文的技術名詞、人名、產品名、程式名稱可保留英文，不要強制翻譯。",
       "避免重複；不要創造逐字稿中沒有的決定、分工或姓名。",
       "只有明確承諾、指派或確認的事項才保留在 decisions/actionItems。",
       "category 用簡短 kebab-case；若標題明顯是 campus-agent/資工專題、演算法、MCL，優先使用 campus-agent、algorithm、mcl。",
@@ -261,16 +274,33 @@ export async function summarizeMeeting(
   );
 
   return {
-    title: typeof final.title === "string" && final.title.trim() ? final.title.trim() : video.title,
+    title:
+      typeof final.title === "string" && final.title.trim()
+        ? toTaiwanTraditional(final.title.trim())
+        : toTaiwanTraditional(video.title),
     category: typeof final.category === "string" && final.category.trim() ? final.category.trim() : fallbackCategory,
-    summary: typeof final.summary === "string" ? final.summary.trim() : partials.map((x) => x.summary).join("\n\n"),
-    decisions: Array.isArray(final.decisions) ? final.decisions.filter((x): x is string => typeof x === "string") : [],
+    summary:
+      typeof final.summary === "string"
+        ? toTaiwanTraditional(final.summary.trim())
+        : toTaiwanTraditional(partials.map((x) => x.summary).join("\n\n")),
+    decisions: Array.isArray(final.decisions)
+      ? final.decisions.filter((x): x is string => typeof x === "string").map(toTaiwanTraditional)
+      : [],
     actionItems: Array.isArray(final.actionItems)
-      ? final.actionItems.filter((x): x is { owner?: string; task: string } => Boolean(x && typeof x.task === "string"))
+      ? final.actionItems
+          .filter((x): x is { owner?: string; task: string } => Boolean(x && typeof x.task === "string"))
+          .map((x) => ({
+            owner: typeof x.owner === "string" ? toTaiwanTraditional(x.owner) : undefined,
+            task: toTaiwanTraditional(x.task),
+          }))
       : [],
     topics: Array.isArray(final.topics)
-      ? final.topics.filter((x): x is { timestamp?: string; topic: string } => Boolean(x && typeof x.topic === "string"))
+      ? final.topics
+          .filter((x): x is { timestamp?: string; topic: string } => Boolean(x && typeof x.topic === "string"))
+          .map((x) => ({ timestamp: typeof x.timestamp === "string" ? x.timestamp : undefined, topic: toTaiwanTraditional(x.topic) }))
       : [],
-    tags: Array.isArray(final.tags) ? final.tags.filter((x): x is string => typeof x === "string") : ["meeting", fallbackCategory],
+    tags: Array.isArray(final.tags)
+      ? final.tags.filter((x): x is string => typeof x === "string").map(toTaiwanTraditional)
+      : ["meeting", fallbackCategory],
   };
 }
