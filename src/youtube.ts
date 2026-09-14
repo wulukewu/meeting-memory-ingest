@@ -60,7 +60,7 @@ async function youtubeGet<T>(path: string, accessToken: string, params: URLSearc
 }
 
 export async function listPlaylistVideos(env: Env, accessToken: string): Promise<VideoRecord[]> {
-  if (!env.YOUTUBE_PLAYLIST_ID || env.YOUTUBE_PLAYLIST_ID === "REPLACE_ME") {
+  if (!env.YOUTUBE_PLAYLIST_ID) {
     throw new Error("YOUTUBE_PLAYLIST_ID is not configured");
   }
 
