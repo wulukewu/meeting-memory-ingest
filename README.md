@@ -1,14 +1,15 @@
 # meeting-memory-ingest
 
-把一個 **Private YouTube playlist** 當成 AI Memory Inbox。只有你手動設為 `Unlisted` 的影片才會被 Cloudflare Worker 處理；Worker 會用 Groq 轉錄／整理，再把 Markdown reference commit 到 `wulukewu/ai-memory`。
+把一個 **Private YouTube playlist** 當成 AI Memory Inbox。平常影片可保持 `Private`；要處理時手動切成 `Unlisted`。Cloudflare Worker 每 5 分鐘掃一次，只有真的有新影片時才 dispatch 一個短暫 GitHub Action，用 yt-dlp 解析 signed audio URL；之後 Groq 轉錄／摘要，再把 Markdown 寫進 `wulukewu/ai-memory`。
 
-日常操作：
+## 日常操作
 
-1. 錄影／錄音後上傳 YouTube，平常可保持 `Private`。
+1. 錄影／錄音後上傳 YouTube，平常保持 `Private`。
 2. 要讓 AI 處理時，把該影片改成 `Unlisted`，並放進唯一的 Private playlist。
-3. Worker 每 5 分鐘掃一次，每輪預設只吃 1 支。
-4. 完成後有空再手動把影片改回 `Private`。
-5. `ai-memory` 本機同步後，逐字稿自然成為 agent reference。
+3. Worker 每 5 分鐘掃一次，每輪預設只 claim 1 支。
+4. Claim 成功後 Worker dispatch GitHub Actions resolver；Action 只解析 signed audio URL，不下載整支影片。
+5. Resolver callback Worker 後，Worker 用 Groq Whisper 轉錄、GPT-OSS 摘要，再 commit 到 `ai-memory`。
+6. 完成後有空再把影片切回 `Private`。
 
 ## Architecture
 
@@ -20,19 +21,20 @@ Private YouTube playlist
 Cloudflare Worker Cron
         │
         ├─ Private video  → skip
-        └─ Unlisted video → process
+        └─ Unlisted video → claim manifest
                 │
                 ▼
-      Cloudflare Browser Run
-  Chromium loads the YouTube page
+   GitHub Actions (on demand only)
+        yt-dlp resolve URL
                 │
-     observe googlevideo audio URL
+                │ signed googlevideo URL
+                ▼
+      Worker /resolver/callback
                 │
                 ▼
        Groq Whisper Large v3
                 │
       transcript + timestamps
-                │
                 ▼
         Groq GPT-OSS 120B
  summary / decisions / actions
@@ -45,23 +47,21 @@ wulukewu/ai-memory/main
 reference/meeting-transcripts/...
 ```
 
-大型影音 bytes **不經過 Worker**。Browser Run 只負責讓 YouTube 自己執行播放邏輯並觀察第一個 audio `googlevideo.com/videoplayback` request；Worker 把短效 signed URL 直接交給 Groq。
+大型影音 bytes 不經過 Worker，也不由 Actions 下載保存。Actions 只負責 YouTube playback URL resolution；Groq 直接抓 signed URL。
 
-## 為什麼改用 Browser Run？
+## 為什麼 resolver 改成 GitHub Actions？
 
-最初 V1 使用 `youtubei.js` 在 Worker 內解析 YouTube player JS。第一次真實測試在 Workers Free 上觸發 Cloudflare `1102`：Free Worker 每次 invocation 只有很小的 CPU budget，而 player parsing/deciphering 是 CPU-heavy 工作。
+Cloudflare Workers Free 每次 invocation 的 CPU budget 很小。實測 `youtubei.js` player decipher 會觸發 Cloudflare `1102`；Browser Run 雖然可以播放 YouTube，但 2026 的 web client 會大量使用 SABR/UMP (`application/vnd.yt-ump`)，不再可靠暴露獨立 audio URL。
 
-現在改成 Browser Run：YouTube player code 在 Chromium 裡執行，Worker 只做 API orchestration 與少量 request filtering。
-
-Cloudflare Workers Free 目前包含 Browser Run 免費額度（每日 10 browser minutes）。這個 pipeline 只有遇到實際可處理的 Unlisted 影片才會開 browser，掃 playlist 本身不會消耗 browser minutes。
+GitHub-hosted Ubuntu runner 上已實測 yt-dlp 可以取得傳統 signed audio URL，而且該 URL 可由另一個 IP 成功下載。把 yt-dlp 限定為 **有新 meeting 才執行一次**，可以避免每 5 分鐘燒 private-repo Actions minutes。
 
 ## Playlist privacy model
 
 - Playlist 本身可以一直保持 **Private**。
 - Worker 用 `youtube.readonly` OAuth 讀 Private playlist metadata。
-- Private 影片會被看到 metadata，但 pipeline 會 skip。
-- 真正要處理的影片需暫時設成 **Unlisted**，因為 Browser Run 不保存你的 Google 登入 cookies。
-- Worker 沒有權限修改影片 privacy；`Private ↔ Unlisted` 仍由你手動控制。
+- Private 影片只會被看到 metadata，不會處理。
+- 真正要 ingest 的影片需暫時設成 **Unlisted**。
+- Worker 沒有修改影片 privacy 的權限。
 
 ## 1. Install
 
@@ -71,100 +71,7 @@ npm test
 npm run typecheck
 ```
 
-本 repo 不使用 production GitHub Actions，避免 private-repo hosted-runner minutes。
-
-## 2. YouTube playlist
-
-只需要一個 Private playlist，例如：
-
-> AI Memory Inbox
-
-`YOUTUBE_PLAYLIST_ID` 不寫進 repo。從 playlist URL 的 `list=` 取得 ID後，在 Cloudflare Worker 的 runtime settings 新增：
-
-```text
-Type: Variable
-Name: YOUTUBE_PLAYLIST_ID
-Value: PL...
-```
-
-## 3. Google Cloud / YouTube OAuth
-
-1. 建 Google Cloud project。
-2. Enable **YouTube Data API v3**。
-3. 設定 OAuth consent / audience。
-4. 建立 **OAuth Client ID → Desktop app**。
-5. 取得：
-   - `YOUTUBE_CLIENT_ID`
-   - `YOUTUBE_CLIENT_SECRET`
-
-取得 refresh token：
-
-```bash
-export YOUTUBE_CLIENT_ID='...'
-export YOUTUBE_CLIENT_SECRET='...'
-npm run youtube:auth
-```
-
-helper 使用：
-
-```text
-https://www.googleapis.com/auth/youtube.readonly
-```
-
-並要求 offline access。授權後會輸出：
-
-```text
-YOUTUBE_REFRESH_TOKEN=...
-```
-
-把 Client ID、Client Secret、Refresh Token 都設成 Cloudflare **Secret**。
-
-> OAuth app 若維持 External + Testing，refresh token 可能只有短期效力。第一次 E2E 跑通後，再切到合適的 production publishing 狀態並重新授權。
-
-## 4. Groq API key
-
-Cloudflare Secret：
-
-```text
-GROQ_API_KEY
-```
-
-預設模型：
-
-```text
-STT:     whisper-large-v3
-Summary: openai/gpt-oss-120b
-```
-
-## 5. GitHub token
-
-建 fine-grained PAT，只授權：
-
-```text
-Repository: wulukewu/ai-memory
-Contents: Read and write
-Metadata: Read
-```
-
-Cloudflare Secret：
-
-```text
-GITHUB_TOKEN
-```
-
-## 6. Admin token
-
-```bash
-openssl rand -hex 32
-```
-
-把輸出設成 Cloudflare Secret：
-
-```text
-ADMIN_TOKEN
-```
-
-## 7. Cloudflare runtime configuration
+## 2. Cloudflare runtime configuration
 
 Dashboard：
 
@@ -175,10 +82,17 @@ Workers & Pages
 → Variables and Secrets
 ```
 
-必填 Variable：
+必填 Variables：
 
 ```text
 YOUTUBE_PLAYLIST_ID
+WORKER_PUBLIC_URL
+```
+
+例如：
+
+```text
+WORKER_PUBLIC_URL=https://meeting-memory-ingest.ai-memory.workers.dev
 ```
 
 必填 Secrets：
@@ -190,21 +104,86 @@ YOUTUBE_CLIENT_SECRET
 YOUTUBE_REFRESH_TOKEN
 GITHUB_TOKEN
 ADMIN_TOKEN
+RESOLVER_GITHUB_TOKEN
 ```
 
-不要把這些放在 Build variables；程式需要的是 Worker runtime bindings。
+`GITHUB_TOKEN`：只需能對 `wulukewu/ai-memory` 做 Contents Read/Write。
 
-`wrangler.jsonc` 已宣告 Browser Run binding：
+`RESOLVER_GITHUB_TOKEN`：另建 fine-grained PAT，只授權 `wulukewu/meeting-memory-ingest`，需要：
 
-```jsonc
-"browser": {
-  "binding": "BROWSER"
-}
+```text
+Actions: Read and write
+Metadata: Read
 ```
 
-Cloudflare 部署時會把 `env.BROWSER` 綁到 Browser Run。
+不要把 runtime credentials 放在 Cloudflare Build variables。
 
-## 8. Deploy
+## 3. GitHub Actions callback secret
+
+在 `wulukewu/meeting-memory-ingest`：
+
+```text
+Settings
+→ Secrets and variables
+→ Actions
+→ New repository secret
+```
+
+新增：
+
+```text
+Name: WORKER_ADMIN_TOKEN
+Value: 與 Cloudflare ADMIN_TOKEN 完全相同
+```
+
+Resolver workflow 不需要 Groq key、YouTube OAuth secrets 或 ai-memory PAT。
+
+## 4. YouTube OAuth
+
+Worker 要讀 Private playlist，所以需要 OAuth，而不是單純 API key。
+
+1. Enable **YouTube Data API v3**。
+2. 建 OAuth Desktop client。
+3. 取得 `YOUTUBE_CLIENT_ID`、`YOUTUBE_CLIENT_SECRET`。
+4. 執行：
+
+```bash
+export YOUTUBE_CLIENT_ID='...'
+export YOUTUBE_CLIENT_SECRET='...'
+npm run youtube:auth
+```
+
+把產生的 `YOUTUBE_REFRESH_TOKEN` 設成 Cloudflare Secret。
+
+Scope 只有：
+
+```text
+https://www.googleapis.com/auth/youtube.readonly
+```
+
+## 5. Resolver workflow
+
+`.github/workflows/resolve-youtube.yml` 只接受 `workflow_dispatch`。Worker claim 一支影片後才呼叫 GitHub API dispatch workflow。
+
+Resolver 預設：
+
+```text
+yt-dlp 2026.08.19
+client 1: visionos
+client 2 fallback: default,web_embedded
+format: 140 / bestaudio m4a / bestaudio
+```
+
+Action 成功後把 signed `googlevideo.com` URL POST 到：
+
+```text
+POST /resolver/callback
+Authorization: Bearer <WORKER_ADMIN_TOKEN>
+```
+
+Worker 會驗證 callback URL 必須是 HTTPS `googlevideo.com`，再交給 Groq。
+
+## 6. Deploy
 
 ```bash
 npm install
@@ -217,55 +196,45 @@ Cron：
 */5 * * * *
 ```
 
-`keep_vars: true` 已開啟，避免 repo deploy 清掉 Dashboard-only runtime vars/secrets。
+`keep_vars: true` 已開啟，避免 repo deploy 清掉 Dashboard-only vars/secrets。
 
-## 9. Endpoints
+若新 resolver 設定尚未補齊，`/health` 會顯示缺項，而且 Cron 會直接 skip，不會動 manifest。
 
-### Health
+## 7. Endpoints
+
+Health：
 
 ```text
 GET /health
 ```
 
-不需要 admin token，只回報缺少哪些設定名稱，不會回 secret values。
-
-### Status
+Status：
 
 ```bash
 curl \
   -H "Authorization: Bearer $ADMIN_TOKEN" \
-  https://YOUR_WORKER.workers.dev/status
+  https://meeting-memory-ingest.ai-memory.workers.dev/status
 ```
 
-### Run inbox now
+Process one video：
 
 ```bash
 curl -X POST \
   -H "Authorization: Bearer $ADMIN_TOKEN" \
-  'https://YOUR_WORKER.workers.dev/run?wait=1'
+  'https://meeting-memory-ingest.ai-memory.workers.dev/process/VIDEO_ID?wait=1'
 ```
 
-### Process one video
+成功 claim 後會回 `dispatched: [VIDEO_ID]`；真正完成狀態稍後由 Action callback 更新 manifest。
+
+Force retry：
 
 ```bash
 curl -X POST \
   -H "Authorization: Bearer $ADMIN_TOKEN" \
-  'https://YOUR_WORKER.workers.dev/process/VIDEO_ID?wait=1'
+  'https://meeting-memory-ingest.ai-memory.workers.dev/retry/VIDEO_ID?wait=1'
 ```
 
-影片仍必須是 `Unlisted`。
-
-### Force retry one video
-
-```bash
-curl -X POST \
-  -H "Authorization: Bearer $ADMIN_TOKEN" \
-  'https://YOUR_WORKER.workers.dev/retry/VIDEO_ID?wait=1'
-```
-
-`/retry` 會先清掉 manifest 裡的 failed/cooldown 狀態再重新 claim。
-
-## 10. ai-memory output
+## 8. ai-memory output
 
 ```text
 reference/meeting-transcripts/
@@ -276,31 +245,20 @@ reference/meeting-transcripts/
 └── general/
 ```
 
-`_manifest.json` 是 durable processing state，包含：
+Manifest 狀態：
 
 ```text
-processing / completed / failed
+processing → completed
+           ↘ failed
 ```
 
-Worker 先 claim 再處理，避免 Cron 與手動 trigger 大多數重複 ingest；stuck processing lease 預設 90 分鐘後可回收。
-
-## First real test
-
-1. 把一支短測試影片加入 Private playlist。
-2. 把影片本身設成 `Unlisted`。
-3. 確認 `/health` 為 `configured: true`。
-4. 執行 `/process/VIDEO_ID?wait=1` 或 `/retry/VIDEO_ID?wait=1`。
-5. 確認 Browser Run 取得 audio URL。
-6. 確認 Groq transcription / summary 成功。
-7. 確認 `ai-memory/reference/meeting-transcripts/...md` 與 `_manifest.json` 更新。
-8. 再跑一次，應被 manifest 去重。
-9. 手動把影片改回 `Private`。
+processing lease 預設 90 分鐘，failed retry cooldown 預設 30 分鐘。
 
 ## Security notes
 
-- YouTube OAuth scope 是 readonly。
+- YouTube OAuth 是 readonly。
 - Worker 無法修改影片 privacy。
-- `GITHUB_TOKEN` 只需能寫 `ai-memory`。
-- 所有 API credentials 都是 Worker Secrets。
-- Browser Run 使用匿名瀏覽器，只能播放你已手動設為 Unlisted 的影片。
-- 自動摘要可能出錯，因此 transcript/summary 只寫到 reference，不會自動提升到 `core.md`。
+- `GITHUB_TOKEN` 與 `RESOLVER_GITHUB_TOKEN` 分開，避免擴大 ai-memory PAT 權限。
+- Actions 只拿 `WORKER_ADMIN_TOKEN`，不持有 Groq / Google OAuth / ai-memory secrets。
+- Resolver 不把 signed URL commit 到任何 repo；callback 後即丟給 Groq。
+- AI summary 只寫 reference，不會自動提升到 `core.md`。
