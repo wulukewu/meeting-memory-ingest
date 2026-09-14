@@ -1,4 +1,4 @@
-name: Resolve YouTube audio URL
+name: Resolve and transcribe YouTube audio
 
 on:
   workflow_dispatch:
@@ -11,6 +11,10 @@ on:
         description: Worker resolver callback endpoint
         required: true
         type: string
+      transcription_model:
+        description: Groq transcription model selected by the Worker
+        required: true
+        type: string
 
 permissions:
   contents: read
@@ -18,7 +22,7 @@ permissions:
 jobs:
   resolve:
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 20
     steps:
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -29,12 +33,13 @@ jobs:
         run: |
           python -m pip install --disable-pip-version-check "yt-dlp==2026.8.19"
           sudo apt-get update
-          sudo apt-get install -y wireguard-tools
+          sudo apt-get install -y wireguard-tools ffmpeg
 
-      - name: Resolve through WireGuard and callback Worker
+      - name: Resolve, download, compress, and transcribe
         env:
           VIDEO_ID: ${{ inputs.video_id }}
           CALLBACK_URL: ${{ inputs.callback_url }}
+          TRANSCRIPTION_MODEL: ${{ inputs.transcription_model }}
           WORKER_ADMIN_TOKEN: ${{ secrets.WORKER_ADMIN_TOKEN }}
           WG_CONF: ${{ secrets.WG_CONF }}
         shell: bash
@@ -43,6 +48,10 @@ jobs:
 
           if [[ ! "$VIDEO_ID" =~ ^[A-Za-z0-9_-]{6,20}$ ]]; then
             echo "Invalid video id" >&2
+            exit 2
+          fi
+          if [[ ! "$TRANSCRIPTION_MODEL" =~ ^[A-Za-z0-9._/-]+$ ]]; then
+            echo "Invalid transcription model" >&2
             exit 2
           fi
           if [[ -z "${WORKER_ADMIN_TOKEN:-}" ]]; then
@@ -59,8 +68,11 @@ jobs:
           fi
 
           ERR_FILE="$(mktemp)"
+          SOURCE_FILE="/tmp/meeting-source.bin"
+          UPLOAD_FILE="/tmp/meeting-upload.ogg"
           AUDIO_URL=""
           PAYLOAD=""
+          UPLOAD_READY=0
           WG_UP=0
 
           cleanup_wg() {
@@ -158,51 +170,93 @@ jobs:
                   '{videoId:$videoId,error:$error}')"
               fi
             fi
-          fi
 
-          # Restore the runner's normal egress before testing URL portability and callback.
-          cleanup_wg
-          trap - EXIT
+            if [[ -z "$PAYLOAD" && -n "$AUDIO_URL" ]]; then
+              echo "Downloading source audio while the WireGuard egress is active."
+              set +e
+              curl -fL --retry 2 --retry-all-errors --connect-timeout 15 --max-time 900 \
+                -o "$SOURCE_FILE" "$AUDIO_URL"
+              DOWNLOAD_RC=$?
+              set -e
 
-          if [[ -z "$PAYLOAD" && -n "$AUDIO_URL" ]]; then
-            PORTABLE_STATUS="$(curl -sS -L --max-time 20 --range 0-0 -o /dev/null -w '%{http_code}' "$AUDIO_URL" || true)"
-            if [[ "$PORTABLE_STATUS" =~ ^2 ]]; then
-              echo "Resolved final media URL is reachable outside WireGuard."
-              PAYLOAD="$(jq -n \
-                --arg videoId "$VIDEO_ID" \
-                --arg audioUrl "$AUDIO_URL" \
-                '{videoId:$videoId,audioUrl:$audioUrl}')"
-            else
-              PAYLOAD="$(jq -n \
-                --arg videoId "$VIDEO_ID" \
-                --arg error "final media URL is not portable outside the WireGuard egress (HTTP ${PORTABLE_STATUS:-unknown}); the signed URL may be source-IP-bound" \
-                '{videoId:$videoId,error:$error}')"
+              if [[ $DOWNLOAD_RC -ne 0 || ! -s "$SOURCE_FILE" ]]; then
+                PAYLOAD="$(jq -n \
+                  --arg videoId "$VIDEO_ID" \
+                  --arg error "resolved media URL could not be downloaded through the WireGuard egress" \
+                  '{videoId:$videoId,error:$error}')"
+              else
+                echo "Compressing meeting audio for Groq direct upload."
+                set +e
+                ffmpeg -nostdin -hide_banner -loglevel error -y \
+                  -i "$SOURCE_FILE" -vn -map 0:a:0 -ac 1 -ar 16000 \
+                  -c:a libopus -b:a 24k -application voip "$UPLOAD_FILE"
+                FFMPEG_RC=$?
+                set -e
+
+                if [[ $FFMPEG_RC -ne 0 || ! -s "$UPLOAD_FILE" ]]; then
+                  PAYLOAD="$(jq -n \
+                    --arg videoId "$VIDEO_ID" \
+                    --arg error "ffmpeg could not prepare the meeting audio for transcription" \
+                    '{videoId:$videoId,error:$error}')"
+                else
+                  UPLOAD_BYTES="$(stat -c%s "$UPLOAD_FILE")"
+                  if (( UPLOAD_BYTES > 24000000 )); then
+                    PAYLOAD="$(jq -n \
+                      --arg videoId "$VIDEO_ID" \
+                      --arg error "compressed meeting audio is ${UPLOAD_BYTES} bytes, above the 24 MB safety limit for Groq free-tier upload" \
+                      '{videoId:$videoId,error:$error}')"
+                  else
+                    echo "Prepared compressed audio for direct Groq upload (${UPLOAD_BYTES} bytes)."
+                    UPLOAD_READY=1
+                  fi
+                fi
+              fi
             fi
           fi
 
-          if [[ -z "$PAYLOAD" ]]; then
-            PAYLOAD="$(jq -n \
-              --arg videoId "$VIDEO_ID" \
-              --arg error "resolver exited without an audio URL or diagnostic" \
-              '{videoId:$videoId,error:$error}')"
+          # The YouTube media is now local; restore normal runner egress before
+          # uploading it to the Worker. The Worker keeps GROQ_API_KEY private and
+          # streams this multipart body directly to Groq without buffering audio.
+          cleanup_wg
+          trap - EXIT
+
+          if [[ "$UPLOAD_READY" == "1" ]]; then
+            TRANSCRIBE_URL="${CALLBACK_URL%/resolver/callback}/resolver/transcribe"
+            HTTP_CODE="$(curl -sS --max-time 1200 \
+              -o /tmp/callback-response.json \
+              -w '%{http_code}' \
+              -X POST \
+              -H "Authorization: Bearer ${WORKER_ADMIN_TOKEN}" \
+              -H "X-Video-ID: ${VIDEO_ID}" \
+              -F "file=@${UPLOAD_FILE};type=audio/ogg" \
+              -F "model=${TRANSCRIPTION_MODEL}" \
+              -F 'response_format=verbose_json' \
+              -F 'timestamp_granularities[]=segment' \
+              -F 'prompt=繁體中文會議，可能混用英文技術名詞。保留英文技術詞、程式名稱與人名原文。' \
+              "$TRANSCRIBE_URL")"
+          else
+            if [[ -z "$PAYLOAD" ]]; then
+              PAYLOAD="$(jq -n \
+                --arg videoId "$VIDEO_ID" \
+                --arg error "resolver exited without an audio upload or diagnostic" \
+                '{videoId:$videoId,error:$error}')"
+            fi
+            HTTP_CODE="$(curl -sS --max-time 60 \
+              -o /tmp/callback-response.json \
+              -w '%{http_code}' \
+              -X POST \
+              -H "Authorization: Bearer ${WORKER_ADMIN_TOKEN}" \
+              -H 'Content-Type: application/json' \
+              --data "$PAYLOAD" \
+              "$CALLBACK_URL")"
           fi
 
-          HTTP_CODE="$(curl -sS \
-            -o /tmp/callback-response.json \
-            -w '%{http_code}' \
-            -X POST \
-            -H "Authorization: Bearer ${WORKER_ADMIN_TOKEN}" \
-            -H 'Content-Type: application/json' \
-            --data "$PAYLOAD" \
-            "$CALLBACK_URL")"
+          cat /tmp/callback-response.json || true
 
           if [[ ! "$HTTP_CODE" =~ ^2 ]]; then
-            echo "Worker callback failed with HTTP ${HTTP_CODE}" >&2
-            cat /tmp/callback-response.json >&2 || true
+            echo "Worker callback/transcription failed with HTTP ${HTTP_CODE}" >&2
             exit 1
           fi
-
-          cat /tmp/callback-response.json
 
           if jq -e '.status == "failed"' /tmp/callback-response.json >/dev/null 2>&1; then
             echo "Worker reported resolver/pipeline failure" >&2
