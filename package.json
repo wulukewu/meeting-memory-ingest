@@ -12,7 +12,7 @@
     "youtube:auth": "node scripts/youtube-oauth.mjs"
   },
   "dependencies": {
-    "youtubei.js": "18.0.0"
+    "@cloudflare/puppeteer": "1.1.0"
   },
   "devDependencies": {
     "typescript": "^5.9.0",

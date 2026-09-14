@@ -6,12 +6,10 @@ export interface Env {
   YOUTUBE_REFRESH_TOKEN: string;
   GITHUB_TOKEN: string;
   ADMIN_TOKEN: string;
-  YOUTUBE_PO_TOKEN?: string;
-  YOUTUBE_VISITOR_DATA?: string;
 
-  // Wrangler vars
+  // Cloudflare bindings / vars
+  BROWSER: any;
   YOUTUBE_PLAYLIST_ID: string;
-  YOUTUBE_INNERTUBE_CLIENT: string;
   AI_MEMORY_OWNER: string;
   AI_MEMORY_REPO: string;
   AI_MEMORY_BRANCH: string;

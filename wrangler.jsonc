@@ -4,11 +4,13 @@
   "main": "src/index.ts",
   "compatibility_date": "2026-09-14",
   "keep_vars": true,
+  "browser": {
+    "binding": "BROWSER"
+  },
   "triggers": {
     "crons": ["*/5 * * * *"]
   },
   "vars": {
-    "YOUTUBE_INNERTUBE_CLIENT": "VISIONOS",
     "AI_MEMORY_OWNER": "wulukewu",
     "AI_MEMORY_REPO": "ai-memory",
     "AI_MEMORY_BRANCH": "main",
