@@ -6,10 +6,14 @@ export interface Env {
   YOUTUBE_REFRESH_TOKEN: string;
   GITHUB_TOKEN: string;
   ADMIN_TOKEN: string;
+  RESOLVER_GITHUB_TOKEN: string;
 
-  // Cloudflare bindings / vars
-  BROWSER: any;
+  // Wrangler / Dashboard vars
   YOUTUBE_PLAYLIST_ID: string;
+  WORKER_PUBLIC_URL: string;
+  RESOLVER_GITHUB_OWNER: string;
+  RESOLVER_GITHUB_REPO: string;
+  RESOLVER_GITHUB_WORKFLOW: string;
   AI_MEMORY_OWNER: string;
   AI_MEMORY_REPO: string;
   AI_MEMORY_BRANCH: string;
@@ -107,6 +111,7 @@ export interface RunResult {
   scanned: number;
   eligible: number;
   claimed: number;
+  dispatched: string[];
   completed: string[];
   skipped: Array<{ videoId: string; reason: string }>;
   failed: Array<{ videoId: string; error: string }>;
