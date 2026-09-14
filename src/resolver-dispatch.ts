@@ -1,4 +1,4 @@
-import type { Env } from "./types";
+import type { Env, ManifestEntry } from "./types";
 import { truncate } from "./util";
 
 function callbackUrl(env: Env): string {
@@ -6,7 +6,7 @@ function callbackUrl(env: Env): string {
   return `${base}/resolver/callback`;
 }
 
-export async function dispatchYouTubeResolver(env: Env, videoId: string): Promise<void> {
+export async function dispatchYouTubeResolver(env: Env, videoId: string, entry: ManifestEntry): Promise<void> {
   const owner = encodeURIComponent(env.RESOLVER_GITHUB_OWNER);
   const repo = encodeURIComponent(env.RESOLVER_GITHUB_REPO);
   const workflow = encodeURIComponent(env.RESOLVER_GITHUB_WORKFLOW);
@@ -25,6 +25,8 @@ export async function dispatchYouTubeResolver(env: Env, videoId: string): Promis
         video_id: videoId,
         callback_url: callbackUrl(env),
         transcription_model: env.GROQ_TRANSCRIPTION_MODEL || "whisper-large-v3",
+        start_chunk_index: String(entry.nextChunkIndex || 0),
+        chunk_seconds: String(entry.chunkSeconds || 2700),
       },
     }),
   });
