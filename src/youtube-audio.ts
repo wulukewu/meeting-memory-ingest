@@ -27,6 +27,7 @@ export async function resolveYouTubeAudioUrl(env: Env, videoId: string): Promise
     type: "audio",
     quality: "best",
     format: "any",
+    client: (env.YOUTUBE_INNERTUBE_CLIENT || "VISIONOS") as "VISIONOS",
   });
 
   if (!format?.url) throw new Error(`YouTube.js did not return a playable audio URL for ${videoId}`);
