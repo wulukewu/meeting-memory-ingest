@@ -1,0 +1,108 @@
+name: Resolve YouTube audio URL
+
+on:
+  workflow_dispatch:
+    inputs:
+      video_id:
+        description: YouTube video ID to resolve
+        required: true
+        type: string
+      callback_url:
+        description: Worker resolver callback endpoint
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  resolve:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Install pinned yt-dlp
+        run: python -m pip install --disable-pip-version-check "yt-dlp==2026.8.19"
+
+      - name: Resolve signed audio URL and callback Worker
+        env:
+          VIDEO_ID: ${{ inputs.video_id }}
+          CALLBACK_URL: ${{ inputs.callback_url }}
+          WORKER_ADMIN_TOKEN: ${{ secrets.WORKER_ADMIN_TOKEN }}
+        shell: bash
+        run: |
+          set -uo pipefail
+
+          if [[ ! "$VIDEO_ID" =~ ^[A-Za-z0-9_-]{6,20}$ ]]; then
+            echo "Invalid video id" >&2
+            exit 2
+          fi
+          if [[ -z "${WORKER_ADMIN_TOKEN:-}" ]]; then
+            echo "WORKER_ADMIN_TOKEN secret is not configured" >&2
+            exit 2
+          fi
+          if [[ ! "$CALLBACK_URL" =~ ^https:// ]]; then
+            echo "Callback URL must use https" >&2
+            exit 2
+          fi
+
+          ERR_FILE="$(mktemp)"
+          AUDIO_URL=""
+
+          resolve_with_client() {
+            local clients="$1"
+            : > "$ERR_FILE"
+            set +e
+            AUDIO_URL="$(yt-dlp \
+              --no-playlist \
+              --js-runtimes node \
+              --extractor-args "youtube:player_client=${clients}" \
+              --format '140/bestaudio[ext=m4a]/bestaudio' \
+              --get-url \
+              "https://www.youtube.com/watch?v=${VIDEO_ID}" \
+              2>"$ERR_FILE")"
+            local rc=$?
+            set -e
+            AUDIO_URL="$(printf '%s\n' "$AUDIO_URL" | sed -n '1p')"
+            [[ $rc -eq 0 && "$AUDIO_URL" == https://* ]]
+          }
+
+          set -e
+          if ! resolve_with_client "visionos"; then
+            if ! resolve_with_client "default,web_embedded"; then
+              ERROR_TEXT="$(tail -c 1200 "$ERR_FILE" | tr '\r\n' '  ' | sed 's/[[:space:]]\+/ /g')"
+              PAYLOAD="$(jq -n \
+                --arg videoId "$VIDEO_ID" \
+                --arg error "yt-dlp could not resolve audio: ${ERROR_TEXT}" \
+                '{videoId:$videoId,error:$error}')"
+            fi
+          fi
+
+          if [[ -n "$AUDIO_URL" ]]; then
+            echo "::add-mask::$AUDIO_URL"
+            PAYLOAD="$(jq -n \
+              --arg videoId "$VIDEO_ID" \
+              --arg audioUrl "$AUDIO_URL" \
+              '{videoId:$videoId,audioUrl:$audioUrl}')"
+          fi
+
+          HTTP_CODE="$(curl -sS \
+            -o /tmp/callback-response.json \
+            -w '%{http_code}' \
+            -X POST \
+            -H "Authorization: Bearer ${WORKER_ADMIN_TOKEN}" \
+            -H 'Content-Type: application/json' \
+            --data "$PAYLOAD" \
+            "$CALLBACK_URL")"
+
+          if [[ ! "$HTTP_CODE" =~ ^2 ]]; then
+            echo "Worker callback failed with HTTP ${HTTP_CODE}" >&2
+            cat /tmp/callback-response.json >&2 || true
+            exit 1
+          fi
+
+          cat /tmp/callback-response.json
