@@ -28,7 +28,7 @@ export async function dispatchYouTubeResolver(env: Env, videoId: string): Promis
     }),
   });
 
-  if (response.status !== 204) {
+  if (!response.ok) {
     throw new Error(`GitHub resolver dispatch failed (${response.status}): ${truncate(await response.text(), 800)}`);
   }
 }
