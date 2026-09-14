@@ -11,6 +11,9 @@
     "test": "vitest run",
     "youtube:auth": "node scripts/youtube-oauth.mjs"
   },
+  "dependencies": {
+    "opencc-js": "1.4.2"
+  },
   "devDependencies": {
     "typescript": "^5.9.0",
     "vitest": "^4.0.0",
