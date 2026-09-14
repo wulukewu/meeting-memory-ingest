@@ -1,15 +1,33 @@
 import type { Env, RunResult, TriggerKind, VideoRecord } from "./types";
-import { claimVideo, completeVideo, failVideo, upsertTextFile } from "./github";
+import { claimVideo, completeVideo, failVideo, loadManifest, upsertTextFile } from "./github";
 import { summarizeMeeting, transcribeAudioUrl } from "./groq";
 import { buildTranscriptPath, renderMeetingMarkdown } from "./markdown";
+import { dispatchYouTubeResolver } from "./resolver-dispatch";
 import { errorMessage, parsePositiveInt } from "./util";
 import { getVideo, getYouTubeAccessToken, listPlaylistVideos } from "./youtube";
-import { resolveYouTubeAudioUrl } from "./youtube-audio";
 
-async function processClaimedVideo(env: Env, video: VideoRecord): Promise<string> {
+function validateResolvedAudioUrl(rawUrl: string): string {
+  const url = new URL(rawUrl);
+  if (url.protocol !== "https:") throw new Error("resolved audio URL must use https");
+  if (!(url.hostname === "googlevideo.com" || url.hostname.endsWith(".googlevideo.com"))) {
+    throw new Error(`resolved audio URL has unexpected host: ${url.hostname}`);
+  }
+  return url.toString();
+}
+
+async function dispatchClaimedVideo(env: Env, video: VideoRecord): Promise<void> {
   try {
-    const audio = await resolveYouTubeAudioUrl(env, video.id);
-    const transcript = await transcribeAudioUrl(env, audio.url, video);
+    await dispatchYouTubeResolver(env, video.id);
+  } catch (error) {
+    await failVideo(env, video, error);
+    throw error;
+  }
+}
+
+async function processResolvedVideo(env: Env, video: VideoRecord, audioUrl: string): Promise<string> {
+  try {
+    const safeAudioUrl = validateResolvedAudioUrl(audioUrl);
+    const transcript = await transcribeAudioUrl(env, safeAudioUrl, video);
     const summary = await summarizeMeeting(env, video, transcript);
     const path = buildTranscriptPath(env, video, summary);
     const markdown = renderMeetingMarkdown(env, video, transcript, summary);
@@ -23,7 +41,7 @@ async function processClaimedVideo(env: Env, video: VideoRecord): Promise<string
 }
 
 function baseResult(trigger: TriggerKind): RunResult {
-  return { trigger, scanned: 0, eligible: 0, claimed: 0, completed: [], skipped: [], failed: [] };
+  return { trigger, scanned: 0, eligible: 0, claimed: 0, dispatched: [], completed: [], skipped: [], failed: [] };
 }
 
 export async function runPlaylist(env: Env, trigger: TriggerKind = "cron"): Promise<RunResult> {
@@ -50,8 +68,8 @@ export async function runPlaylist(env: Env, trigger: TriggerKind = "cron"): Prom
 
     result.claimed += 1;
     try {
-      await processClaimedVideo(env, video);
-      result.completed.push(video.id);
+      await dispatchClaimedVideo(env, video);
+      result.dispatched.push(video.id);
     } catch (error) {
       result.failed.push({ videoId: video.id, error: errorMessage(error) });
     }
@@ -80,10 +98,38 @@ export async function runSingleVideo(env: Env, videoId: string): Promise<RunResu
 
   result.claimed = 1;
   try {
-    await processClaimedVideo(env, video);
-    result.completed.push(video.id);
+    await dispatchClaimedVideo(env, video);
+    result.dispatched.push(video.id);
   } catch (error) {
     result.failed.push({ videoId, error: errorMessage(error) });
   }
   return result;
+}
+
+export async function handleResolverCallback(
+  env: Env,
+  payload: { videoId: string; audioUrl?: string; error?: string },
+): Promise<{ videoId: string; status: "completed" | "failed" | "ignored"; path?: string }> {
+  if (!/^[A-Za-z0-9_-]{6,20}$/.test(payload.videoId)) throw new Error("invalid video id");
+
+  const { manifest } = await loadManifest(env);
+  const entry = manifest.videos[payload.videoId];
+  if (entry?.status === "completed") {
+    return { videoId: payload.videoId, status: "ignored", path: entry.path };
+  }
+  if (!entry || entry.status !== "processing") {
+    throw new Error(`video ${payload.videoId} is not currently claimed for processing`);
+  }
+
+  const accessToken = await getYouTubeAccessToken(env);
+  const video = await getVideo(env, accessToken, payload.videoId);
+
+  if (payload.error) {
+    await failVideo(env, video, new Error(`resolver failed: ${payload.error}`));
+    return { videoId: payload.videoId, status: "failed" };
+  }
+  if (!payload.audioUrl) throw new Error("resolver callback did not include audioUrl or error");
+
+  const path = await processResolvedVideo(env, video, payload.audioUrl);
+  return { videoId: payload.videoId, status: "completed", path };
 }
