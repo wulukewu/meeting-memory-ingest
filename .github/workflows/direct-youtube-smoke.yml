@@ -19,8 +19,11 @@ jobs:
         with:
           python-version: "3.13"
 
-      - name: Install pinned yt-dlp
-        run: python -m pip install --disable-pip-version-check "yt-dlp==2026.8.19"
+      - name: Install pinned yt-dlp with impersonation support
+        run: python -m pip install --disable-pip-version-check "yt-dlp[default,curl-cffi]==2026.8.19"
+
+      - name: Show available impersonation targets
+        run: yt-dlp --list-impersonate-targets
 
       - name: Probe direct GitHub-hosted egress
         shell: bash
@@ -89,10 +92,12 @@ jobs:
           success=""
           if probe_strategy "default"; then
             success="default"
-          elif probe_strategy "web_embedded" --extractor-args "youtube:player_client=web_embedded"; then
-            success="web_embedded"
-          elif probe_strategy "visionos" --extractor-args "youtube:player_client=visionos"; then
-            success="visionos"
+          elif probe_strategy "chrome" --impersonate chrome; then
+            success="chrome"
+          elif probe_strategy "chrome_web_embedded" --impersonate chrome --extractor-args "youtube:player_client=web_embedded"; then
+            success="chrome_web_embedded"
+          elif probe_strategy "android_vr" --extractor-args "youtube:player_client=android_vr"; then
+            success="android_vr"
           fi
 
           if [[ -z "$success" ]]; then
