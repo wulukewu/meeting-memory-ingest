@@ -4,7 +4,7 @@ import { loadManifest, makeRetryableNow } from "./github";
 import { handleResolverCallback, handleResolverTranscription, runPlaylist, runSingleVideo } from "./pipeline";
 import { jsonResponse } from "./util";
 
-const PIPELINE_VERSION = "resumable-chunks-v1+dashboard-v1";
+const PIPELINE_VERSION = "resumable-chunks-v1+dashboard-v1.1";
 
 function isAdmin(request: Request, env: Env): boolean {
   const auth = request.headers.get("authorization");
