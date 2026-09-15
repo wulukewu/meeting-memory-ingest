@@ -143,6 +143,15 @@ function taipeiTime(value?: string): string {
 function rowUpdatedAt(entry?: ManifestEntry): string | undefined {
   return entry?.completedAt || entry?.failedAt || entry?.retryAfterAt || entry?.startedAt;
 }
+function isYouTubeBotBlocked(entry?: ManifestEntry): boolean {
+  const error = entry?.lastError?.toLowerCase() || "";
+  return (
+    error.includes("youtube_bot_blocked") ||
+    error.includes("confirm you’re not a bot") ||
+    error.includes("confirm you're not a bot") ||
+    error.includes("login_required")
+  );
+}
 
 export function buildDashboardRow(video: VideoRecord, manifest: Manifest): DashboardRow {
   const entry = manifest.videos[video.id];
@@ -161,10 +170,40 @@ export function buildDashboardRow(video: VideoRecord, manifest: Manifest): Dashb
     return { video, entry, group: "processing", statusLabel: "處理中", actionHint: "不用操作" };
   }
   if (entry?.status === "waiting") {
-    return { video, entry, group: "waiting", statusLabel: "等待額度", actionHint: "會自動續跑" };
+    if (isYouTubeBotBlocked(entry)) {
+      return {
+        video,
+        entry,
+        group: "waiting",
+        statusLabel: "YouTube 冷卻中",
+        actionHint: "下載出口被 YouTube 暫時阻擋；到時間後自動重試",
+      };
+    }
+    return {
+      video,
+      entry,
+      group: "waiting",
+      statusLabel: "等待 Groq 額度",
+      actionHint: "額度恢復後自動續跑",
+    };
   }
   if (entry?.status === "failed") {
-    return { video, entry, group: "failed", statusLabel: "失敗", actionHint: "冷卻後會自動重試" };
+    if (isYouTubeBotBlocked(entry)) {
+      return {
+        video,
+        entry,
+        group: "failed",
+        statusLabel: "YouTube 阻擋",
+        actionHint: "目前下載出口遭 YouTube 阻擋；達重試時間後會自動再試",
+      };
+    }
+    return {
+      video,
+      entry,
+      group: "failed",
+      statusLabel: "失敗",
+      actionHint: "達重試時間後會自動再試；可展開錯誤資訊確認原因",
+    };
   }
   if (privacy === "private") {
     return { video, entry, group: "private", statusLabel: "Private", actionHint: "尚未排入處理" };
@@ -213,7 +252,9 @@ function renderDashboard(env: Env, rows: DashboardRow[], manifest: Manifest): st
         : "";
       const privacyClass = video.privacyStatus.toLowerCase() === "private" ? "muted" : video.privacyStatus.toLowerCase() === "unlisted" ? "warn" : "ok";
       const error = entry?.lastError ? `<details><summary>錯誤資訊</summary><pre>${escapeHtml(entry.lastError)}</pre></details>` : "";
-      const waiting = entry?.status === "waiting" && entry.retryAfterAt ? `<span class="subtle">續跑 ${escapeHtml(taipeiTime(entry.retryAfterAt))}</span>` : "";
+      const waiting = entry?.status === "waiting" && entry.retryAfterAt
+        ? `<span class="subtle">${isYouTubeBotBlocked(entry) ? "重試" : "續跑"} ${escapeHtml(taipeiTime(entry.retryAfterAt))}</span>`
+        : "";
       return `<article class="video-card" data-group="${row.group}" data-search="${escapeHtml(`${video.title} ${video.id}`.toLowerCase())}">
         <div class="topline"><div class="title-wrap"><h2>${escapeHtml(video.title)}</h2><div class="meta"><span>${escapeHtml(durationLabel(video.durationSeconds))}</span><span>${escapeHtml(video.id)}</span><span class="badge ${privacyClass}">${escapeHtml(video.privacyStatus)}</span></div></div><span class="status status-${row.group}">${escapeHtml(row.statusLabel)}</span></div>
         <div class="status-grid"><div><span class="label">建議</span><strong>${escapeHtml(row.actionHint)}</strong></div><div><span class="label">進度</span><strong>${escapeHtml(progressLabel(entry))}</strong>${waiting}</div><div><span class="label">更新</span><strong>${escapeHtml(taipeiTime(rowUpdatedAt(entry)))}</strong></div></div>
@@ -226,7 +267,7 @@ function renderDashboard(env: Env, rows: DashboardRow[], manifest: Manifest): st
   return `<!doctype html><html lang="zh-Hant"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta http-equiv="refresh" content="60"><title>Meeting Memory Dashboard</title><style>
   :root{color-scheme:dark;background:#090b0e;color:#f4f6f8;font-family:Inter,ui-sans-serif,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}*{box-sizing:border-box}body{margin:0;background:#090b0e}.shell{width:min(1120px,calc(100% - 32px));margin:0 auto;padding:28px 0 56px}header{display:flex;justify-content:space-between;gap:20px;align-items:flex-start;margin-bottom:22px}.header-actions{display:flex;gap:8px;align-items:center;flex-wrap:wrap;justify-content:flex-end}h1{font-size:26px;letter-spacing:-.02em;margin:0}.subtitle{color:#8895a3;margin:7px 0 0;font-size:14px}.control,.logout{border:1px solid #28313a;border-radius:9px;padding:8px 11px;cursor:pointer;font:inherit;font-size:13px}.control{background:#151b21;color:#d7e0e8}.control.primary{background:#eef2f5;color:#0b0d10;border-color:#eef2f5;font-weight:700}.control:disabled{opacity:.5;cursor:wait}.logout{background:none;color:#aeb8c2}.run-status{font-size:12px;color:#8f9daa;min-height:18px;text-align:right;margin-top:7px}.run-status.error{color:#ff9e9e}.stats{display:grid;grid-template-columns:repeat(6,minmax(0,1fr));gap:10px;margin-bottom:16px}.stat{background:#11151a;border:1px solid #202831;border-radius:13px;padding:13px}.stat b{font-size:22px;display:block}.stat span{font-size:12px;color:#82909e}.toolbar{position:sticky;top:0;z-index:3;background:rgba(9,11,14,.92);backdrop-filter:blur(10px);display:flex;gap:8px;padding:12px 0}.toolbar input{flex:1;min-width:140px;background:#11161b;border:1px solid #26313a;color:#fff;border-radius:10px;padding:10px 12px}.filter{background:#11161b;border:1px solid #26313a;color:#aab6c2;border-radius:10px;padding:9px 11px;cursor:pointer}.filter.active{background:#eef2f5;color:#0b0d10;border-color:#eef2f5}.list{display:grid;gap:10px}.video-card{background:#101419;border:1px solid #202932;border-radius:15px;padding:17px}.topline{display:flex;justify-content:space-between;gap:18px}.title-wrap{min-width:0}h2{font-size:16px;margin:0 0 7px;line-height:1.4}.meta{display:flex;gap:8px;align-items:center;flex-wrap:wrap;font-size:12px;color:#82909e}.badge,.status{font-size:11px;border-radius:999px;padding:4px 8px;white-space:nowrap}.badge{background:#1a222a}.badge.warn{color:#f6d479;background:#2b2414}.badge.ok{color:#8be1ad;background:#14271c}.badge.muted{color:#aab4bd;background:#1b2025}.status{height:max-content;font-weight:700}.status-action{background:#13351f;color:#8cf0ad}.status-processing{background:#132d47;color:#8cc9ff}.status-waiting{background:#332811;color:#f1cd75}.status-failed{background:#39191a;color:#ff9c9c}.status-ready{background:#28243d;color:#c7b8ff}.status-private{background:#1e2328;color:#9aa7b3}.status-grid{display:grid;grid-template-columns:2fr 1fr 1fr;gap:12px;margin:15px 0}.status-grid>div{background:#0c1014;border-radius:10px;padding:10px 11px}.label{display:block;color:#71808e;font-size:11px;margin-bottom:4px}.status-grid strong{font-size:13px}.subtle{display:block;color:#8b98a5;font-size:11px;margin-top:3px}.links{display:flex;gap:7px;flex-wrap:wrap}.links a{color:#b8c5d1;text-decoration:none;border:1px solid #29343e;border-radius:8px;padding:7px 9px;font-size:12px}.links a.primary{background:#eef2f5;color:#0b0d10;border-color:#eef2f5;font-weight:700}details{margin:10px 0;color:#d7a4a4;font-size:12px}pre{white-space:pre-wrap;overflow-wrap:anywhere;background:#0a0d10;padding:10px;border-radius:8px;color:#c7a3a3}.empty{padding:36px;text-align:center;color:#7d8995;border:1px dashed #26313a;border-radius:14px}@media(max-width:760px){header{flex-direction:column}.header-actions{justify-content:flex-start}.run-status{text-align:left}.stats{grid-template-columns:repeat(3,1fr)}.toolbar{overflow-x:auto}.filter{white-space:nowrap}.status-grid{grid-template-columns:1fr}.topline{align-items:flex-start}.shell{width:min(100% - 20px,1120px)}}
   </style></head><body><main class="shell"><header><div><h1>Meeting Memory</h1><p class="subtitle">Playlist 可見影片 ${counts.all} 支 · manifest 更新 ${escapeHtml(taipeiTime(manifest.updatedAt))} · 每 60 秒自動重新整理</p></div><div><div class="header-actions"><button class="control primary" id="run-now" type="button">立即掃描</button><button class="control" id="refresh-now" type="button">重新整理</button><form method="post" action="/dashboard/logout"><button class="logout" type="submit">登出</button></form></div><div class="run-status" id="run-status" aria-live="polite"></div></div></header>
-  <section class="stats"><div class="stat"><b>${counts.action}</b><span>已完成，可收回</span></div><div class="stat"><b>${counts.active}</b><span>處理中 / 等額度</span></div><div class="stat"><b>${counts.failed}</b><span>失敗</span></div><div class="stat"><b>${counts.ready}</b><span>待處理</span></div><div class="stat"><b>${counts.private}</b><span>Private</span></div><div class="stat"><b>${counts.all}</b><span>目前可見</span></div></section>
+  <section class="stats"><div class="stat"><b>${counts.action}</b><span>已完成，可收回</span></div><div class="stat"><b>${counts.active}</b><span>處理中 / 等待</span></div><div class="stat"><b>${counts.failed}</b><span>失敗</span></div><div class="stat"><b>${counts.ready}</b><span>待處理</span></div><div class="stat"><b>${counts.private}</b><span>Private</span></div><div class="stat"><b>${counts.all}</b><span>目前可見</span></div></section>
   <section class="toolbar"><input id="search" type="search" placeholder="搜尋標題或 video ID"><button class="filter active" data-filter="all">全部</button><button class="filter" data-filter="action">可收回</button><button class="filter" data-filter="active">處理中</button><button class="filter" data-filter="ready">待處理</button><button class="filter" data-filter="private">Private</button><button class="filter" data-filter="failed">失敗</button></section>
   <section class="list" id="list">${cards || '<div class="empty">目前沒有可顯示的 playlist 影片。</div>'}</section></main><script>
   const filters=[...document.querySelectorAll('.filter')], cards=[...document.querySelectorAll('.video-card')], search=document.getElementById('search'); let active='all';
