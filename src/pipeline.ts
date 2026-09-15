@@ -18,6 +18,7 @@ import {
   loadManifest,
   recordChunkCompleted,
   upsertTextFile,
+  YOUTUBE_BOT_BLOCK_MARKER,
 } from "./github";
 import { GroqRateLimitError, summarizeMeeting, transcribeAudioUpload, transcribeAudioUrl } from "./groq";
 import { buildTranscriptPath, renderMeetingMarkdown } from "./markdown";
@@ -301,10 +302,25 @@ export async function handleResolverTranscription(
   };
 }
 
+export type ResolverCallbackPayload = {
+  videoId: string;
+  audioUrl?: string;
+  error?: string;
+  errorCode?: string;
+  retryAfterSeconds?: number;
+};
+
+export type ResolverCallbackResult = {
+  videoId: string;
+  status: "completed" | "failed" | "deferred" | "ignored";
+  path?: string;
+  retryAfterAt?: string;
+};
+
 export async function handleResolverCallback(
   env: Env,
-  payload: { videoId: string; audioUrl?: string; error?: string },
-): Promise<{ videoId: string; status: "completed" | "failed" | "ignored"; path?: string }> {
+  payload: ResolverCallbackPayload,
+): Promise<ResolverCallbackResult> {
   if (!/^[A-Za-z0-9_-]{6,20}$/.test(payload.videoId)) throw new Error("invalid video id");
 
   const { manifest } = await loadManifest(env);
@@ -320,6 +336,21 @@ export async function handleResolverCallback(
   const video = await getVideo(env, accessToken, payload.videoId);
 
   if (payload.error) {
+    if (payload.errorCode === "youtube_bot_blocked") {
+      const requestedRetry = Number(payload.retryAfterSeconds);
+      const retryAfterSeconds = Number.isFinite(requestedRetry)
+        ? Math.min(24 * 60 * 60, Math.max(5 * 60, Math.ceil(requestedRetry)))
+        : 2 * 60 * 60;
+      const retryAfterAt = new Date(Date.now() + retryAfterSeconds * 1000).toISOString();
+      await deferVideo(
+        env,
+        video,
+        retryAfterSeconds,
+        new Error(`${YOUTUBE_BOT_BLOCK_MARKER} YouTube requested bot verification: ${payload.error}`),
+      );
+      return { videoId: payload.videoId, status: "deferred", retryAfterAt };
+    }
+
     await failVideo(env, video, new Error(`resolver failed: ${payload.error}`));
     return { videoId: payload.videoId, status: "failed" };
   }
