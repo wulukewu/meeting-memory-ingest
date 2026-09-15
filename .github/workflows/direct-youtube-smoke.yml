@@ -11,95 +11,68 @@ permissions:
 
 jobs:
   probe:
-    runs-on: macos-latest
-    timeout-minutes: 10
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
     steps:
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.13"
 
-      - name: Install yt-dlp with impersonation support
-        run: python -m pip install --disable-pip-version-check "yt-dlp[default,curl-cffi]==2026.8.19"
+      - name: Install yt-dlp and PO token plugin
+        run: |
+          python -m pip install --disable-pip-version-check "yt-dlp[default,curl-cffi]==2026.8.19" bgutil-ytdlp-pot-provider
 
-      - name: Probe direct macOS egress
+      - name: Build ephemeral PO token generator
+        shell: bash
+        run: |
+          set -euo pipefail
+          git clone --depth 1 --branch 2.0.0 https://github.com/Brainicism/bgutil-ytdlp-pot-provider.git /tmp/bgutil-ytdlp-pot-provider
+          cd /tmp/bgutil-ytdlp-pot-provider/server
+          npm ci --no-audit --no-fund
+          npx tsc
+
+      - name: Probe direct egress with generated guest PO token
         shell: bash
         env:
           VIDEO_ID: fjLxk0sKD5c
         run: |
-          set -uo pipefail
+          set -euo pipefail
           URL="https://www.youtube.com/watch?v=${VIDEO_ID}"
+          ERR=/tmp/ytdlp.err
+          OUT=/tmp/audio.url
+          BODY=/tmp/audio.probe
 
-          probe_strategy() {
-            local name="$1"
-            shift
-            local err="/tmp/${name}.err"
-            local out="/tmp/${name}.url"
-            local body="/tmp/${name}.probe"
-            : > "$err"
-            : > "$out"
-            rm -f "$body"
+          set +e
+          yt-dlp -v \
+            --no-playlist \
+            --js-runtimes node \
+            --extractor-args "youtube:player_client=mweb" \
+            --extractor-args "youtubepot-bgutilscript:server_home=/tmp/bgutil-ytdlp-pot-provider/server" \
+            --format '140/bestaudio[ext=m4a]/bestaudio' \
+            --get-url \
+            "$URL" >"$OUT" 2>"$ERR"
+          rc=$?
+          set -e
 
-            echo "::group::strategy=${name}"
-            set +e
-            yt-dlp \
-              --no-playlist \
-              --js-runtimes node \
-              --format '140/bestaudio[ext=m4a]/bestaudio' \
-              --get-url \
-              "$@" \
-              "$URL" \
-              >"$out" 2>"$err"
-            local ytdlp_rc=$?
-            set -e
-
-            local audio_url
-            audio_url="$(sed -n '1p' "$out")"
-            if [[ $ytdlp_rc -ne 0 || "$audio_url" != https://* ]]; then
-              echo "yt-dlp extraction failed (rc=${ytdlp_rc})"
-              tail -c 1600 "$err" || true
-              echo
-              echo "::endgroup::"
-              return 1
-            fi
-
-            echo "yt-dlp extraction succeeded; probing first 1 MiB from signed media URL."
-            echo "::add-mask::$audio_url"
-            set +e
-            http_code="$(curl -L -sS --fail-with-body \
-              --connect-timeout 15 \
-              --max-time 45 \
-              --range 0-1048575 \
-              --max-filesize 2097152 \
-              -o "$body" \
-              -w '%{http_code}' \
-              "$audio_url")"
-            local curl_rc=$?
-            set -e
-
-            local bytes=0
-            if [[ -f "$body" ]]; then
-              bytes="$(stat -f%z "$body")"
-            fi
-            echo "media probe: curl_rc=${curl_rc} http=${http_code:-none} bytes=${bytes}"
-            echo "::endgroup::"
-            [[ $curl_rc -eq 0 && $bytes -gt 0 ]]
-          }
-
-          success=""
-          if probe_strategy "default"; then
-            success="default"
-          elif probe_strategy "chrome" --impersonate chrome; then
-            success="chrome"
-          elif probe_strategy "web_embedded" --impersonate chrome --extractor-args "youtube:player_client=web_embedded"; then
-            success="web_embedded"
-          elif probe_strategy "visionos" --extractor-args "youtube:player_client=visionos"; then
-            success="visionos"
-          fi
-
-          if [[ -z "$success" ]]; then
-            echo "macOS GitHub-hosted egress could not extract and fetch media bytes without extra configuration." >&2
+          cat "$ERR"
+          audio_url="$(sed -n '1p' "$OUT")"
+          if [[ $rc -ne 0 || "$audio_url" != https://* ]]; then
+            echo "PO-token-assisted extraction failed (rc=${rc})." >&2
             exit 1
           fi
 
-          echo "DIRECT_YOUTUBE_SMOKE_SUCCESS=${success}"
+          echo "PO-token-assisted extraction succeeded; probing signed media bytes."
+          echo "::add-mask::$audio_url"
+          http_code="$(curl -L -sS --fail-with-body \
+            --connect-timeout 15 \
+            --max-time 45 \
+            --range 0-1048575 \
+            --max-filesize 2097152 \
+            -o "$BODY" \
+            -w '%{http_code}' \
+            "$audio_url")"
+          bytes="$(stat -c%s "$BODY")"
+          echo "media probe: http=${http_code} bytes=${bytes}"
+          [[ "$bytes" -gt 0 ]]
+          echo "DIRECT_YOUTUBE_SMOKE_SUCCESS=bgutil-pot"
