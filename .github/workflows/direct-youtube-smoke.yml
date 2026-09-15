@@ -14,65 +14,76 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 12
     steps:
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.13"
-
-      - name: Install yt-dlp and PO token plugin
-        run: |
-          python -m pip install --disable-pip-version-check "yt-dlp[default,curl-cffi]==2026.8.19" bgutil-ytdlp-pot-provider
-
-      - name: Build ephemeral PO token generator
+      - name: Start ephemeral Invidious Companion
         shell: bash
         run: |
           set -euo pipefail
-          git clone --depth 1 --branch 2.0.0 https://github.com/Brainicism/bgutil-ytdlp-pot-provider.git /tmp/bgutil-ytdlp-pot-provider
-          cd /tmp/bgutil-ytdlp-pot-provider/server
-          npm ci --no-audit --no-fund
-          npx tsc
+          docker volume create companion-cache >/dev/null
+          docker run -d --name invidious-companion \
+            -p 127.0.0.1:8282:8282 \
+            -e SERVER_SECRET_KEY=meeting-memory-smoke \
+            -v companion-cache:/var/tmp/youtubei.js:rw \
+            quay.io/invidious/invidious-companion:latest >/dev/null
 
-      - name: Probe direct egress with generated guest PO token
+      - name: Wait for session and probe audio stream
         shell: bash
         env:
           VIDEO_ID: fjLxk0sKD5c
         run: |
           set -euo pipefail
-          URL="https://www.youtube.com/watch?v=${VIDEO_ID}"
-          ERR=/tmp/ytdlp.err
-          OUT=/tmp/audio.url
-          BODY=/tmp/audio.probe
+          PLAYER_URL="http://127.0.0.1:8282/companion/youtubei/v1/player"
+          RESPONSE=/tmp/player.json
+          READY=0
 
-          set +e
-          yt-dlp -v \
-            --no-playlist \
-            --js-runtimes node \
-            --extractor-args "youtube:player_client=mweb" \
-            --extractor-args "youtubepot-bgutilscript:server_home=/tmp/bgutil-ytdlp-pot-provider/server" \
-            --format '140/bestaudio[ext=m4a]/bestaudio' \
-            --get-url \
-            "$URL" >"$OUT" 2>"$ERR"
-          rc=$?
-          set -e
+          for attempt in $(seq 1 18); do
+            code="$(curl -sS --max-time 20 \
+              -o "$RESPONSE" \
+              -w '%{http_code}' \
+              -X POST \
+              -H 'Authorization: Bearer meeting-memory-smoke' \
+              -H 'Content-Type: application/json' \
+              --data "{\"videoId\":\"${VIDEO_ID}\"}" \
+              "$PLAYER_URL" || true)"
+            echo "companion attempt ${attempt}: HTTP ${code}"
+            if [[ "$code" == "200" ]] && jq -e '.streamingData' "$RESPONSE" >/dev/null 2>&1; then
+              READY=1
+              break
+            fi
+            tail -c 500 "$RESPONSE" 2>/dev/null || true
+            echo
+            sleep 5
+          done
 
-          cat "$ERR"
-          audio_url="$(sed -n '1p' "$OUT")"
-          if [[ $rc -ne 0 || "$audio_url" != https://* ]]; then
-            echo "PO-token-assisted extraction failed (rc=${rc})." >&2
+          if [[ "$READY" != "1" ]]; then
+            echo "Companion did not produce streaming data." >&2
+            docker logs --tail 160 invidious-companion || true
             exit 1
           fi
 
-          echo "PO-token-assisted extraction succeeded; probing signed media bytes."
+          audio_url="$(jq -r '(.streamingData.adaptiveFormats // [])[] | select(.itag == 140) | .url // empty' "$RESPONSE" | head -n1)"
+          if [[ "$audio_url" != https://* ]]; then
+            echo "Companion returned player data but no direct itag 140 URL." >&2
+            jq '{playabilityStatus, streamingData: {formats: (.streamingData.formats // [] | map({itag, mimeType})), adaptiveFormats: (.streamingData.adaptiveFormats // [] | map({itag, mimeType, hasUrl: has("url")}))}}' "$RESPONSE" || true
+            docker logs --tail 160 invidious-companion || true
+            exit 1
+          fi
+
+          echo "Companion produced itag 140 URL; probing first 1 MiB."
           echo "::add-mask::$audio_url"
+          body=/tmp/audio.probe
           http_code="$(curl -L -sS --fail-with-body \
             --connect-timeout 15 \
             --max-time 45 \
             --range 0-1048575 \
             --max-filesize 2097152 \
-            -o "$BODY" \
+            -o "$body" \
             -w '%{http_code}' \
             "$audio_url")"
-          bytes="$(stat -c%s "$BODY")"
+          bytes="$(stat -c%s "$body")"
           echo "media probe: http=${http_code} bytes=${bytes}"
           [[ "$bytes" -gt 0 ]]
-          echo "DIRECT_YOUTUBE_SMOKE_SUCCESS=bgutil-pot"
+          echo "DIRECT_YOUTUBE_SMOKE_SUCCESS=invidious-companion"
+
+      - name: Show Companion logs on failure
+        if: failure()
+        run: docker logs --tail 200 invidious-companion || true
