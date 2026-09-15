@@ -1,0 +1,97 @@
+name: Direct YouTube macOS smoke test
+
+on:
+  push:
+    branches:
+      - research/direct-youtube-macos-smoke
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    runs-on: macos-latest
+    timeout-minutes: 10
+    steps:
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Install pinned yt-dlp
+        run: python -m pip install --disable-pip-version-check "yt-dlp==2026.8.19"
+
+      - name: Probe cookie-free direct egress
+        shell: bash
+        env:
+          VIDEO_ID: fjLxk0sKD5c
+        run: |
+          set -uo pipefail
+          URL="https://www.youtube.com/watch?v=${VIDEO_ID}"
+
+          probe() {
+            local name="$1"
+            local format="$2"
+            shift 2
+            local out="/tmp/${name}.url"
+            local err="/tmp/${name}.err"
+            local body="/tmp/${name}.probe"
+            rm -f "$out" "$err" "$body"
+
+            echo "::group::strategy=${name}"
+            set +e
+            yt-dlp \
+              --no-playlist \
+              --js-runtimes node \
+              --format "$format" \
+              --get-url \
+              "$@" \
+              "$URL" >"$out" 2>"$err"
+            local rc=$?
+            set -e
+
+            local media_url
+            media_url="$(sed -n '1p' "$out")"
+            if [[ $rc -ne 0 || "$media_url" != https://* ]]; then
+              echo "yt-dlp extraction failed (rc=${rc})"
+              tail -c 1600 "$err" || true
+              echo
+              echo "::endgroup::"
+              return 1
+            fi
+
+            echo "yt-dlp extraction succeeded; probing first 1 MiB."
+            echo "::add-mask::$media_url"
+            set +e
+            http_code="$(curl -L -sS --fail-with-body \
+              --connect-timeout 15 \
+              --max-time 45 \
+              --range 0-1048575 \
+              --max-filesize 2097152 \
+              -o "$body" \
+              -w '%{http_code}' \
+              "$media_url")"
+            local curl_rc=$?
+            set -e
+            local bytes=0
+            if [[ -f "$body" ]]; then bytes="$(wc -c < "$body" | tr -d ' ')"; fi
+            echo "media probe: curl_rc=${curl_rc} http=${http_code:-none} bytes=${bytes}"
+            echo "::endgroup::"
+            [[ $curl_rc -eq 0 && $bytes -gt 0 ]]
+          }
+
+          success=""
+          if probe "default" '140/bestaudio[ext=m4a]/bestaudio'; then
+            success="default"
+          elif probe "android_vr" '18/140/bestaudio' --extractor-args "youtube:player_client=android_vr"; then
+            success="android_vr"
+          elif probe "visionos" '140/bestaudio[ext=m4a]/bestaudio' --extractor-args "youtube:player_client=visionos"; then
+            success="visionos"
+          fi
+
+          if [[ -z "$success" ]]; then
+            echo "No cookie-free strategy succeeded from macOS hosted runner." >&2
+            exit 1
+          fi
+          echo "DIRECT_YOUTUBE_MACOS_SMOKE_SUCCESS=${success}"
