@@ -3,6 +3,7 @@ import { nextPendingChunk, normalizedCompletedChunks, chunkCount } from "./chunk
 import { base64ToUtf8, errorMessage, parsePositiveInt, truncate, utf8ToBase64 } from "./util";
 
 const API_ROOT = "https://api.github.com";
+export const YOUTUBE_BOT_BLOCK_MARKER = "[youtube_bot_blocked]";
 
 interface ContentFile {
   sha: string;
@@ -115,6 +116,16 @@ async function saveManifest(env: Env, manifest: Manifest, sha?: string, message 
   await putTextFile(env, manifestPath(env), `${JSON.stringify(manifest, null, 2)}\n`, message, sha);
 }
 
+export function youtubeResolverCooldownUntil(manifest: Manifest, now = Date.now()): string | undefined {
+  let latestRetryAt = 0;
+  for (const entry of Object.values(manifest.videos)) {
+    if (entry.status !== "waiting" || !entry.retryAfterAt || !entry.lastError?.includes(YOUTUBE_BOT_BLOCK_MARKER)) continue;
+    const retryAt = Date.parse(entry.retryAfterAt);
+    if (Number.isFinite(retryAt) && retryAt > now && retryAt > latestRetryAt) latestRetryAt = retryAt;
+  }
+  return latestRetryAt > 0 ? new Date(latestRetryAt).toISOString() : undefined;
+}
+
 export async function claimVideo(env: Env, video: VideoRecord): Promise<ClaimResult> {
   const { manifest, sha } = await loadManifest(env);
   const existing = manifest.videos[video.id];
@@ -123,6 +134,12 @@ export async function claimVideo(env: Env, video: VideoRecord): Promise<ClaimRes
   const retryMs = parsePositiveInt(env.RETRY_FAILED_AFTER_MINUTES, 30) * 60_000;
 
   if (existing?.status === "completed") return { claimed: false, reason: "already completed" };
+
+  const resolverCooldownUntil = youtubeResolverCooldownUntil(manifest, now);
+  if (resolverCooldownUntil) {
+    return { claimed: false, reason: `YouTube resolver cooldown is active until ${resolverCooldownUntil}` };
+  }
+
   if (existing?.status === "processing" && existing.startedAt && now - Date.parse(existing.startedAt) < leaseMs) {
     return { claimed: false, reason: "processing lease is still active" };
   }
