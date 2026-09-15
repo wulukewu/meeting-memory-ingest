@@ -91,6 +91,7 @@ jobs:
           PAYLOAD=""
           CHUNKS_READY=0
           WG_UP=0
+          YOUTUBE_BOT_COOLDOWN_SECONDS=7200
 
           cleanup_wg() {
             if [[ "$WG_UP" == "1" ]]; then
@@ -163,15 +164,39 @@ jobs:
               [[ $rc -eq 0 && -n "$SOURCE_FILE" && -s "$SOURCE_FILE" ]]
             }
 
+            youtube_bot_blocked() {
+              grep -Eqi "Sign in to confirm you.?re not a bot|confirm you.?re not a bot|LOGIN_REQUIRED" "$ERR_FILE"
+            }
+
+            set_bot_block_payload() {
+              local error_text
+              error_text="$(tail -c 1200 "$ERR_FILE" | tr '\r\n' '  ' | sed 's/[[:space:]]\+/ /g')"
+              echo "YouTube anti-bot challenge detected; deferring resolver work for ${YOUTUBE_BOT_COOLDOWN_SECONDS}s."
+              PAYLOAD="$(jq -n \
+                --arg videoId "$VIDEO_ID" \
+                --arg error "$error_text" \
+                --arg errorCode "youtube_bot_blocked" \
+                --argjson retryAfterSeconds "$YOUTUBE_BOT_COOLDOWN_SECONDS" \
+                '{videoId:$videoId,error:$error,errorCode:$errorCode,retryAfterSeconds:$retryAfterSeconds}')"
+            }
+
             set -e
             if ! download_with_client "visionos"; then
-              echo "visionos download failed; retrying with fallback YouTube clients."
-              if ! download_with_client "default,web_embedded"; then
-                ERROR_TEXT="$(tail -c 1200 "$ERR_FILE" | tr '\r\n' '  ' | sed 's/[[:space:]]\+/ /g')"
-                PAYLOAD="$(jq -n \
-                  --arg videoId "$VIDEO_ID" \
-                  --arg error "yt-dlp could not download audio through WireGuard: ${ERROR_TEXT}" \
-                  '{videoId:$videoId,error:$error}')"
+              if youtube_bot_blocked; then
+                set_bot_block_payload
+              else
+                echo "visionos download failed; retrying with fallback YouTube clients."
+                if ! download_with_client "default,web_embedded"; then
+                  if youtube_bot_blocked; then
+                    set_bot_block_payload
+                  else
+                    ERROR_TEXT="$(tail -c 1200 "$ERR_FILE" | tr '\r\n' '  ' | sed 's/[[:space:]]\+/ /g')"
+                    PAYLOAD="$(jq -n \
+                      --arg videoId "$VIDEO_ID" \
+                      --arg error "yt-dlp could not download audio through WireGuard: ${ERROR_TEXT}" \
+                      '{videoId:$videoId,error:$error}')"
+                  fi
+                fi
               fi
             fi
 
@@ -307,6 +332,10 @@ jobs:
             if [[ ! "$HTTP_CODE" =~ ^2 ]]; then
               echo "Worker callback failed with HTTP ${HTTP_CODE}" >&2
               exit 1
+            fi
+            if jq -e '.status == "deferred"' /tmp/callback-response.json >/dev/null 2>&1; then
+              echo "Resolver work deferred after a recoverable YouTube access block."
+              exit 0
             fi
             if jq -e '.status == "failed"' /tmp/callback-response.json >/dev/null 2>&1; then
               echo "Worker reported resolver failure" >&2
