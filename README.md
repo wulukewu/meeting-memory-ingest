@@ -13,6 +13,36 @@
 
 不需要日常手動呼叫 `/run` 或 `/retry`。
 
+## Dashboard
+
+瀏覽器開啟：
+
+```text
+https://meeting-memory-ingest.ai-memory.workers.dev/dashboard
+```
+
+第一次輸入既有的 `ADMIN_TOKEN`。Worker 會換成一個 7 天有效的 HttpOnly / Secure / SameSite session cookie；token 不會放進 URL 或 localStorage。
+
+Dashboard 會把目前 YouTube playlist 可讀到的影片和 `ai-memory` manifest 合併顯示：
+
+- `已完成`：可把影片改回 Private；如果已經是 Private，就可以直接移出 playlist。
+- `處理中`：顯示已完成 chunk / 總 chunk。
+- `等待額度`：顯示 Groq quota 後預計續跑時間。
+- `失敗`：顯示錯誤資訊；正常 cooldown 後仍會自動重試。
+- `待處理`：Unlisted 但尚未被 Cron claim。
+- `Private`：尚未排入 ingest。
+
+每支影片都有：
+
+- **Studio 編輯** → `https://studio.youtube.com/video/<videoId>/edit`
+- **Playlist** → 在指定 playlist 中開啟該影片
+- **YouTube** → 一般影片頁
+- **Transcript** → 完成後直達 ai-memory Markdown
+
+頁面預設把最需要人工處理的項目排在前面，並提供狀態 filter、標題 / video ID 搜尋，以及 60 秒自動重新整理。
+
+Dashboard 是唯讀的：它不會自動修改 YouTube visibility，也不會從 playlist 移除影片。
+
 ## Architecture
 
 ```text
@@ -236,7 +266,9 @@ timestamp_granularities[]=segment
 
 No instructional Whisper prompt is used. This avoids prompt text being hallucinated into low-speech portions of a recording.
 
-The Worker also conservatively drops segments for which Whisper reports `no_speech_prob >= 0.8`. This is intended to remove obvious silence hallucinations without aggressively deleting uncertain real speech.
+Whisper transcript text is normalized from Simplified Chinese to Taiwan Traditional Chinese (`cn → tw`) after transcription. English technical terms, product names, commands, and code identifiers remain unchanged. The summary layer is also instructed to prefer Traditional Chinese while preserving English terms.
+
+The Worker conservatively drops segments for which Whisper reports `no_speech_prob >= 0.8`. This is intended to remove obvious silence hallucinations without aggressively deleting uncertain real speech.
 
 Final summary prompts are conservative: discussion possibilities must not be promoted to decisions/action items unless the transcript explicitly contains a decision, commitment, or assignment.
 
@@ -261,6 +293,12 @@ Health:
 
 ```text
 GET /health
+```
+
+Private browser dashboard:
+
+```text
+GET /dashboard
 ```
 
 Status:
@@ -315,6 +353,7 @@ processing ──chunk success──> processing
 
 - YouTube OAuth is readonly.
 - Worker cannot modify video privacy.
+- Dashboard is read-only and protected by the existing `ADMIN_TOKEN`; successful login creates an HMAC-signed HttpOnly session cookie.
 - `GITHUB_TOKEN` and `RESOLVER_GITHUB_TOKEN` are deliberately separate.
 - Actions only receive `WORKER_ADMIN_TOKEN` and the dedicated WireGuard config.
 - Signed YouTube media URLs are not stored or committed.
