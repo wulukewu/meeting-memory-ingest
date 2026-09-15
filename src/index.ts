@@ -1,9 +1,10 @@
 import type { Env, ScheduledController, WaitUntilContext } from "./types";
+import { handleDashboardRequest } from "./dashboard";
 import { loadManifest, makeRetryableNow } from "./github";
 import { handleResolverCallback, handleResolverTranscription, runPlaylist, runSingleVideo } from "./pipeline";
 import { jsonResponse } from "./util";
 
-const PIPELINE_VERSION = "resumable-chunks-v1";
+const PIPELINE_VERSION = "resumable-chunks-v1+dashboard-v1";
 
 function isAdmin(request: Request, env: Env): boolean {
   const auth = request.headers.get("authorization");
@@ -39,6 +40,9 @@ async function handleFetch(request: Request, env: Env, ctx: WaitUntilContext): P
   if (request.method === "GET" && url.pathname === "/health") {
     return jsonResponse({ ok: true, service: "meeting-memory-ingest", pipelineVersion: PIPELINE_VERSION, ...configStatus(env) });
   }
+
+  const dashboard = await handleDashboardRequest(request, env);
+  if (dashboard) return dashboard;
 
   if (!isAdmin(request, env)) return jsonResponse({ error: "unauthorized" }, 401);
 
