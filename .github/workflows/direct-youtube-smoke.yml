@@ -19,11 +19,10 @@ jobs:
         with:
           python-version: "3.13"
 
-      - name: Install pinned yt-dlp with impersonation support
-        run: python -m pip install --disable-pip-version-check "yt-dlp[default,curl-cffi]==2026.8.19"
-
-      - name: Show available impersonation targets
-        run: yt-dlp --list-impersonate-targets
+      - name: Install latest yt-dlp master with impersonation support
+        run: |
+          python -m pip install --disable-pip-version-check "yt-dlp[default,curl-cffi] @ https://github.com/yt-dlp/yt-dlp/archive/master.zip"
+          yt-dlp --version
 
       - name: Probe direct GitHub-hosted egress
         shell: bash
@@ -60,7 +59,7 @@ jobs:
             audio_url="$(sed -n '1p' "$out")"
             if [[ $ytdlp_rc -ne 0 || "$audio_url" != https://* ]]; then
               echo "yt-dlp extraction failed (rc=${ytdlp_rc})"
-              tail -c 1600 "$err" || true
+              tail -c 2000 "$err" || true
               echo
               echo "::endgroup::"
               return 1
@@ -90,18 +89,16 @@ jobs:
           }
 
           success=""
-          if probe_strategy "default"; then
-            success="default"
-          elif probe_strategy "chrome" --impersonate chrome; then
-            success="chrome"
-          elif probe_strategy "chrome_web_embedded" --impersonate chrome --extractor-args "youtube:player_client=web_embedded"; then
-            success="chrome_web_embedded"
-          elif probe_strategy "android_vr" --extractor-args "youtube:player_client=android_vr"; then
-            success="android_vr"
+          if probe_strategy "master_default"; then
+            success="master_default"
+          elif probe_strategy "master_chrome" --impersonate chrome; then
+            success="master_chrome"
+          elif probe_strategy "master_web_embedded" --impersonate chrome --extractor-args "youtube:player_client=web_embedded"; then
+            success="master_web_embedded"
           fi
 
           if [[ -z "$success" ]]; then
-            echo "No direct, cookie-free strategy could extract and fetch media bytes." >&2
+            echo "Latest yt-dlp master still cannot use direct cookie-free GitHub-hosted egress." >&2
             exit 1
           fi
 
