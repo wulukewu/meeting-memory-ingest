@@ -25,86 +25,92 @@ jobs:
           path = Path("src/dashboard.ts")
           text = path.read_text()
 
-          anchor = '''function rowUpdatedAt(entry?: ManifestEntry): string | undefined {
-            return entry?.completedAt || entry?.failedAt || entry?.retryAfterAt || entry?.startedAt;
-          }
-          '''
-          helper = anchor + '''
-          function isYouTubeBotBlocked(entry?: ManifestEntry): boolean {
-            const error = entry?.lastError?.toLowerCase() || "";
-            return (
-              error.includes("youtube_bot_blocked") ||
-              error.includes("confirm you’re not a bot") ||
-              error.includes("confirm you're not a bot") ||
-              error.includes("login_required")
-            );
-          }
-          '''
+          anchor = "\n".join([
+              'function rowUpdatedAt(entry?: ManifestEntry): string | undefined {',
+              '  return entry?.completedAt || entry?.failedAt || entry?.retryAfterAt || entry?.startedAt;',
+              '}',
+              '',
+          ])
+          helper = anchor + "\n".join([
+              'function isYouTubeBotBlocked(entry?: ManifestEntry): boolean {',
+              '  const error = entry?.lastError?.toLowerCase() || "";',
+              '  return (',
+              '    error.includes("youtube_bot_blocked") ||',
+              '    error.includes("confirm you’re not a bot") ||',
+              '    error.includes("confirm you\'re not a bot") ||',
+              '    error.includes("login_required")',
+              '  );',
+              '}',
+              '',
+          ])
           if anchor not in text:
-            raise SystemExit("rowUpdatedAt anchor not found")
+              raise SystemExit("rowUpdatedAt anchor not found")
           text = text.replace(anchor, helper, 1)
 
-          old_states = '''  if (entry?.status === "waiting") {
-            return { video, entry, group: "waiting", statusLabel: "等待額度", actionHint: "會自動續跑" };
-          }
-          if (entry?.status === "failed") {
-            return { video, entry, group: "failed", statusLabel: "失敗", actionHint: "冷卻後會自動重試" };
-          }
-          '''
-          new_states = '''  if (entry?.status === "waiting") {
-            if (isYouTubeBotBlocked(entry)) {
-              return {
-                video,
-                entry,
-                group: "waiting",
-                statusLabel: "YouTube 冷卻中",
-                actionHint: "下載出口被 YouTube 暫時阻擋；到時間後自動重試",
-              };
-            }
-            return {
-              video,
-              entry,
-              group: "waiting",
-              statusLabel: "等待 Groq 額度",
-              actionHint: "額度恢復後自動續跑",
-            };
-          }
-          if (entry?.status === "failed") {
-            if (isYouTubeBotBlocked(entry)) {
-              return {
-                video,
-                entry,
-                group: "failed",
-                statusLabel: "YouTube 阻擋",
-                actionHint: "目前下載出口遭 YouTube 阻擋；達重試時間後會自動再試",
-              };
-            }
-            return {
-              video,
-              entry,
-              group: "failed",
-              statusLabel: "失敗",
-              actionHint: "達重試時間後會自動再試；可展開錯誤資訊確認原因",
-            };
-          }
-          '''
+          old_states = "\n".join([
+              '  if (entry?.status === "waiting") {',
+              '    return { video, entry, group: "waiting", statusLabel: "等待額度", actionHint: "會自動續跑" };',
+              '  }',
+              '  if (entry?.status === "failed") {',
+              '    return { video, entry, group: "failed", statusLabel: "失敗", actionHint: "冷卻後會自動重試" };',
+              '  }',
+          ])
+          new_states = "\n".join([
+              '  if (entry?.status === "waiting") {',
+              '    if (isYouTubeBotBlocked(entry)) {',
+              '      return {',
+              '        video,',
+              '        entry,',
+              '        group: "waiting",',
+              '        statusLabel: "YouTube 冷卻中",',
+              '        actionHint: "下載出口被 YouTube 暫時阻擋；到時間後自動重試",',
+              '      };',
+              '    }',
+              '    return {',
+              '      video,',
+              '      entry,',
+              '      group: "waiting",',
+              '      statusLabel: "等待 Groq 額度",',
+              '      actionHint: "額度恢復後自動續跑",',
+              '    };',
+              '  }',
+              '  if (entry?.status === "failed") {',
+              '    if (isYouTubeBotBlocked(entry)) {',
+              '      return {',
+              '        video,',
+              '        entry,',
+              '        group: "failed",',
+              '        statusLabel: "YouTube 阻擋",',
+              '        actionHint: "目前下載出口遭 YouTube 阻擋；達重試時間後會自動再試",',
+              '      };',
+              '    }',
+              '    return {',
+              '      video,',
+              '      entry,',
+              '      group: "failed",',
+              '      statusLabel: "失敗",',
+              '      actionHint: "達重試時間後會自動再試；可展開錯誤資訊確認原因",',
+              '    };',
+              '  }',
+          ])
           if old_states not in text:
-            raise SystemExit("status mapping block not found")
+              raise SystemExit("status mapping block not found")
           text = text.replace(old_states, new_states, 1)
 
-          old_waiting = '''      const waiting = entry?.status === "waiting" && entry.retryAfterAt ? `<span class="subtle">續跑 ${escapeHtml(taipeiTime(entry.retryAfterAt))}</span>` : "";'''
-          new_waiting = '''      const waiting = entry?.status === "waiting" && entry.retryAfterAt
-                ? `<span class="subtle">${isYouTubeBotBlocked(entry) ? "重試" : "續跑"} ${escapeHtml(taipeiTime(entry.retryAfterAt))}</span>`
-                : "";'''
+          old_waiting = '      const waiting = entry?.status === "waiting" && entry.retryAfterAt ? `<span class="subtle">續跑 ${escapeHtml(taipeiTime(entry.retryAfterAt))}</span>` : "";'
+          new_waiting = "\n".join([
+              '      const waiting = entry?.status === "waiting" && entry.retryAfterAt',
+              '        ? `<span class="subtle">${isYouTubeBotBlocked(entry) ? "重試" : "續跑"} ${escapeHtml(taipeiTime(entry.retryAfterAt))}</span>`',
+              '        : "";',
+          ])
           if old_waiting not in text:
-            raise SystemExit("waiting timestamp block not found")
+              raise SystemExit("waiting timestamp block not found")
           text = text.replace(old_waiting, new_waiting, 1)
 
           old_stats = '<span>處理中 / 等額度</span>'
-          new_stats = '<span>處理中 / 等待</span>'
           if old_stats not in text:
-            raise SystemExit("stats label not found")
-          text = text.replace(old_stats, new_stats, 1)
+              raise SystemExit("stats label not found")
+          text = text.replace(old_stats, '<span>處理中 / 等待</span>', 1)
 
           path.write_text(text)
           PY
