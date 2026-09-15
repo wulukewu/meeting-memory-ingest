@@ -5,7 +5,7 @@
   "compatibility_date": "2026-09-14",
   "keep_vars": true,
   "triggers": {
-    "crons": ["*/5 * * * *"]
+    "crons": ["*/30 * * * *"]
   },
   "vars": {
     "RESOLVER_GITHUB_OWNER": "wulukewu",
