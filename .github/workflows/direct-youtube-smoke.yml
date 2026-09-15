@@ -21,7 +21,7 @@ jobs:
           docker volume create companion-cache >/dev/null
           docker run -d --name invidious-companion \
             -p 127.0.0.1:8282:8282 \
-            -e SERVER_SECRET_KEY=meetingsmoke123 \
+            -e SERVER_SECRET_KEY=1234567890abcdef \
             -v companion-cache:/var/tmp/youtubei.js:rw \
             quay.io/invidious/invidious-companion:latest >/dev/null
 
@@ -40,7 +40,7 @@ jobs:
               -o "$RESPONSE" \
               -w '%{http_code}' \
               -X POST \
-              -H 'Authorization: Bearer meetingsmoke123' \
+              -H 'Authorization: Bearer 1234567890abcdef' \
               -H 'Content-Type: application/json' \
               --data "{\"videoId\":\"${VIDEO_ID}\"}" \
               "$PLAYER_URL" || true)"
