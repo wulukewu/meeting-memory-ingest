@@ -1,0 +1,103 @@
+name: Direct YouTube egress smoke test
+
+on:
+  push:
+    branches:
+      - research/direct-youtube-smoke
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Install pinned yt-dlp
+        run: python -m pip install --disable-pip-version-check "yt-dlp==2026.8.19"
+
+      - name: Probe direct GitHub-hosted egress
+        shell: bash
+        env:
+          VIDEO_ID: fjLxk0sKD5c
+        run: |
+          set -uo pipefail
+          URL="https://www.youtube.com/watch?v=${VIDEO_ID}"
+
+          probe_strategy() {
+            local name="$1"
+            shift
+            local err="/tmp/${name}.err"
+            local out="/tmp/${name}.url"
+            local body="/tmp/${name}.probe"
+            : > "$err"
+            : > "$out"
+            rm -f "$body"
+
+            echo "::group::strategy=${name}"
+            set +e
+            yt-dlp \
+              --no-playlist \
+              --js-runtimes node \
+              --format '140/bestaudio[ext=m4a]/bestaudio' \
+              --get-url \
+              "$@" \
+              "$URL" \
+              >"$out" 2>"$err"
+            local ytdlp_rc=$?
+            set -e
+
+            local audio_url
+            audio_url="$(sed -n '1p' "$out")"
+            if [[ $ytdlp_rc -ne 0 || "$audio_url" != https://* ]]; then
+              echo "yt-dlp extraction failed (rc=${ytdlp_rc})"
+              tail -c 1600 "$err" || true
+              echo
+              echo "::endgroup::"
+              return 1
+            fi
+
+            echo "yt-dlp extraction succeeded; probing first 1 MiB from the signed media URL."
+            echo "::add-mask::$audio_url"
+            set +e
+            http_code="$(curl -L -sS --fail-with-body \
+              --connect-timeout 15 \
+              --max-time 45 \
+              --range 0-1048575 \
+              --max-filesize 2097152 \
+              -o "$body" \
+              -w '%{http_code}' \
+              "$audio_url")"
+            local curl_rc=$?
+            set -e
+
+            local bytes=0
+            if [[ -f "$body" ]]; then
+              bytes="$(stat -c%s "$body")"
+            fi
+            echo "media probe: curl_rc=${curl_rc} http=${http_code:-none} bytes=${bytes}"
+            echo "::endgroup::"
+            [[ $curl_rc -eq 0 && $bytes -gt 0 ]]
+          }
+
+          success=""
+          if probe_strategy "default"; then
+            success="default"
+          elif probe_strategy "web_embedded" --extractor-args "youtube:player_client=web_embedded"; then
+            success="web_embedded"
+          elif probe_strategy "visionos" --extractor-args "youtube:player_client=visionos"; then
+            success="visionos"
+          fi
+
+          if [[ -z "$success" ]]; then
+            echo "No direct, cookie-free strategy could extract and fetch media bytes." >&2
+            exit 1
+          fi
+
+          echo "DIRECT_YOUTUBE_SMOKE_SUCCESS=${success}"
