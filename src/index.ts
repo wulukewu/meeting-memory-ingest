@@ -1,10 +1,11 @@
 import type { Env, ScheduledController, WaitUntilContext } from "./types";
 import { handleDashboardRequest } from "./dashboard";
+import { faviconResponse } from "./favicon";
 import { loadManifest, makeRetryableNow } from "./github";
 import { handleResolverCallback, handleResolverTranscription, runPlaylist, runSingleVideo } from "./pipeline";
 import { jsonResponse } from "./util";
 
-const PIPELINE_VERSION = "resumable-chunks-v1+dashboard-v1.1";
+const PIPELINE_VERSION = "resumable-chunks-v1+dashboard-v1.1+favicon-v1";
 
 function isAdmin(request: Request, env: Env): boolean {
   const auth = request.headers.get("authorization");
@@ -36,6 +37,10 @@ function configError(env: Env): Response | null {
 
 async function handleFetch(request: Request, env: Env, ctx: WaitUntilContext): Promise<Response> {
   const url = new URL(request.url);
+
+  if (request.method === "GET" && (url.pathname === "/favicon.svg" || url.pathname === "/favicon.ico")) {
+    return faviconResponse();
+  }
 
   if (request.method === "GET" && url.pathname === "/health") {
     return jsonResponse({ ok: true, service: "meeting-memory-ingest", pipelineVersion: PIPELINE_VERSION, ...configStatus(env) });
