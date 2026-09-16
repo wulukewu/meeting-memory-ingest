@@ -3,6 +3,10 @@ import { nextPendingChunk, normalizedCompletedChunks, chunkCount } from "./chunk
 import { base64ToUtf8, errorMessage, parsePositiveInt, truncate, utf8ToBase64 } from "./util";
 
 const API_ROOT = "https://api.github.com";
+const AI_MEMORY_AUTOMATION_IDENTITY = {
+  name: "wulukewu",
+  email: "luke@ai-memory.local",
+};
 export const YOUTUBE_BOT_BLOCK_MARKER = "[youtube_bot_blocked]";
 
 interface ContentFile {
@@ -59,6 +63,8 @@ export async function putTextFile(
       message,
       content: utf8ToBase64(text),
       branch: env.AI_MEMORY_BRANCH,
+      author: AI_MEMORY_AUTOMATION_IDENTITY,
+      committer: AI_MEMORY_AUTOMATION_IDENTITY,
       ...(sha ? { sha } : {}),
     }),
   });
@@ -81,7 +87,13 @@ export async function deleteTextFile(env: Env, path: string, message: string): P
   const response = await githubFetch(env, repoPath(env, path), {
     method: "DELETE",
     headers: { "content-type": "application/json" },
-    body: JSON.stringify({ message, sha: current.sha, branch: env.AI_MEMORY_BRANCH }),
+    body: JSON.stringify({
+      message,
+      sha: current.sha,
+      branch: env.AI_MEMORY_BRANCH,
+      author: AI_MEMORY_AUTOMATION_IDENTITY,
+      committer: AI_MEMORY_AUTOMATION_IDENTITY,
+    }),
   });
   if (response.status === 404) return false;
   if (response.status === 409 || response.status === 422) {
