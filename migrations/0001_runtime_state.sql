@@ -29,6 +29,12 @@ CREATE TABLE IF NOT EXISTS chunks (
   FOREIGN KEY (video_id) REFERENCES videos(video_id) ON DELETE CASCADE
 );
 
+CREATE TABLE IF NOT EXISTS runtime_meta (
+  key TEXT PRIMARY KEY,
+  value TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+
 CREATE INDEX IF NOT EXISTS idx_videos_status_updated
   ON videos(status, updated_at);
 
