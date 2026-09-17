@@ -75,12 +75,10 @@ export class FinalizeMeetingWorkflow extends WorkflowEntrypoint<Env, FinalizeWor
 
       if (prepared.alreadyCompleted) return { videoId, status: "completed", path: prepared.path };
 
-      const accessToken = await step.do("load YouTube metadata", PUBLISH_STEP_OPTIONS, async () =>
-        getYouTubeAccessToken(this.env),
-      );
-      const video = await step.do("load video metadata", PUBLISH_STEP_OPTIONS, async () =>
-        getVideo(this.env, accessToken, videoId),
-      );
+      const video = await step.do("load video metadata", PUBLISH_STEP_OPTIONS, async () => {
+        const accessToken = await getYouTubeAccessToken(this.env);
+        return getVideo(this.env, accessToken, videoId);
+      });
 
       const partials: PartialSummary[] = [];
       if (parseBoolean(this.env.SUMMARY_ENABLED, true)) {
@@ -123,7 +121,11 @@ export class FinalizeMeetingWorkflow extends WorkflowEntrypoint<Env, FinalizeWor
       });
 
       await step.do("cleanup temporary R2 work", PUBLISH_STEP_OPTIONS, async () => {
-        await cleanupVideoWork(this.env, videoId);
+        try {
+          await cleanupVideoWork(this.env, videoId);
+        } catch (error) {
+          console.error("Meeting is completed but temporary R2 cleanup failed", videoId, error);
+        }
       });
 
       return { videoId, status: "completed", path };
