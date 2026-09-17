@@ -1,9 +1,10 @@
 import type { Env, StoredTranscriptWork } from "./types";
 import { getTextFile, legacyWorkPath, loadLegacyManifest } from "./github";
-import { upsertLegacyEntry } from "./state";
+import { runtimeMeta, setRuntimeMeta, upsertLegacyEntry } from "./state";
 import { putStoredChunk } from "./work-store";
 
 export interface LegacyMigrationResult {
+  alreadyMigrated: boolean;
   videos: number;
   completedVideos: number;
   workFiles: number;
@@ -12,12 +13,19 @@ export interface LegacyMigrationResult {
 }
 
 export async function migrateLegacyAiMemoryState(env: Env): Promise<LegacyMigrationResult> {
+  const migrationKey = "legacy_ai_memory_migration_v1";
+  if (await runtimeMeta(env, migrationKey)) {
+    return { alreadyMigrated: true, videos: 0, completedVideos: 0, workFiles: 0, chunks: 0, missingWorkFiles: [] };
+  }
+
   const manifest = await loadLegacyManifest(env);
   if (!manifest) {
-    return { videos: 0, completedVideos: 0, workFiles: 0, chunks: 0, missingWorkFiles: [] };
+    await setRuntimeMeta(env, migrationKey, "no-legacy-manifest");
+    return { alreadyMigrated: false, videos: 0, completedVideos: 0, workFiles: 0, chunks: 0, missingWorkFiles: [] };
   }
 
   const result: LegacyMigrationResult = {
+    alreadyMigrated: false,
     videos: 0,
     completedVideos: 0,
     workFiles: 0,
@@ -58,5 +66,6 @@ export async function migrateLegacyAiMemoryState(env: Env): Promise<LegacyMigrat
     }
   }
 
+  await setRuntimeMeta(env, migrationKey, JSON.stringify({ migratedAt: new Date().toISOString(), ...result }));
   return result;
 }
