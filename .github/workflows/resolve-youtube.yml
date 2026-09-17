@@ -266,6 +266,7 @@ jobs:
               CHUNK_BYTES="$(stat -c%s "$chunk_file")"
               echo "Uploading transcript chunk ${chunk_index}/${#CHUNK_FILES[@]} (${CHUNK_BYTES} bytes)."
               HTTP_CODE="$(curl -sS --max-time 1200 \
+                -D /tmp/callback-headers.txt \
                 -o /tmp/callback-response.json \
                 -w '%{http_code}' \
                 -X POST \
@@ -285,6 +286,7 @@ jobs:
 
               if [[ ! "$HTTP_CODE" =~ ^2 ]]; then
                 echo "Worker chunk transcription failed with HTTP ${HTTP_CODE}" >&2
+                grep -iE '^(cf-error-type|cf-ray|server):' /tmp/callback-headers.txt || true
                 exit 1
               fi
 
@@ -294,6 +296,10 @@ jobs:
                   ;;
                 completed)
                   echo "Meeting transcription and finalization completed."
+                  exit 0
+                  ;;
+                finalizing)
+                  echo "All transcript chunks are stored; durable finalization workflow started."
                   exit 0
                   ;;
                 deferred)
