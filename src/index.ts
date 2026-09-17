@@ -31,8 +31,8 @@ function configStatus(env: Env) {
     ...(env.WORKER_PUBLIC_URL ? [] : ["WORKER_PUBLIC_URL"]),
   ];
   const missingBindings = [
-    ...(env.STATE_DB ? [] : ["STATE_DB"]),
-    ...(env.WORK_BUCKET ? [] : ["WORK_BUCKET"]),
+    ...(env.QUEUE_DB ? [] : ["QUEUE_DB"]),
+    ...(env.TRANSCRIPT_WORK ? [] : ["TRANSCRIPT_WORK"]),
     ...(env.FINALIZE_WORKFLOW ? [] : ["FINALIZE_WORKFLOW"]),
   ];
   return {
