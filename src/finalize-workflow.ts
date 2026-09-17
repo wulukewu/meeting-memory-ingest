@@ -22,14 +22,14 @@ import { getVideo, getYouTubeAccessToken } from "./youtube";
 import { parseBoolean } from "./util";
 
 const SUMMARY_STEP_OPTIONS = {
-  retries: { limit: 8, delay: "1 minute", backoff: "linear" as const },
-  timeout: "10 minutes",
-};
+  retries: { limit: 8, delay: "1 minute" as const, backoff: "linear" as const },
+  timeout: "10 minutes" as const,
+} as const;
 
 const PUBLISH_STEP_OPTIONS = {
-  retries: { limit: 5, delay: "10 seconds", backoff: "linear" as const },
-  timeout: "5 minutes",
-};
+  retries: { limit: 5, delay: "10 seconds" as const, backoff: "linear" as const },
+  timeout: "5 minutes" as const,
+} as const;
 
 function summaryInputKey(videoId: string, index: number): string {
   return `work/${videoId}/summary-input-${String(index).padStart(4, "0")}.txt`;
