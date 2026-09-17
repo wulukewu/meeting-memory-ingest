@@ -1,5 +1,5 @@
 import type { Env, Manifest, ManifestEntry, VideoRecord } from "./types";
-import { loadManifest } from "./github";
+import { loadManifest } from "./state";
 import { runPlaylist } from "./pipeline";
 import { getYouTubeAccessToken, listPlaylistVideos } from "./youtube";
 
@@ -167,7 +167,10 @@ export function buildDashboardRow(video: VideoRecord, manifest: Manifest): Dashb
     };
   }
   if (entry?.status === "processing") {
-    return { video, entry, group: "processing", statusLabel: "處理中", actionHint: "不用操作" };
+    return { video, entry, group: "processing", statusLabel: "轉錄中", actionHint: "不用操作" };
+  }
+  if (entry?.status === "finalizing") {
+    return { video, entry, group: "processing", statusLabel: "整理摘要中", actionHint: "Cloudflare Workflow 正在摘要並發布" };
   }
   if (entry?.status === "waiting") {
     if (isYouTubeBotBlocked(entry)) {
@@ -217,6 +220,7 @@ export function buildDashboardRow(video: VideoRecord, manifest: Manifest): Dashb
 function progressLabel(entry?: ManifestEntry): string {
   if (!entry) return "—";
   if (entry.status === "completed") return "完成";
+  if (entry.status === "finalizing") return "摘要 / 發佈";
   const total = entry.totalChunks || 1;
   const done = entry.completedChunks?.length || 0;
   if (total > 1 || done > 0) return `${done} / ${total} chunks`;
