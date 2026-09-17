@@ -59,7 +59,7 @@ export async function migrateLegacyAiMemoryState(env: Env): Promise<LegacyMigrat
       const chunk = work.chunks[String(chunkIndex)];
       if (!chunk) continue;
       const key = await putStoredChunk(env, chunk);
-      await env.STATE_DB.prepare(
+      await env.QUEUE_DB.prepare(
         "INSERT OR REPLACE INTO chunks (video_id,chunk_index,r2_key,completed_at) VALUES (?,?,?,?)",
       ).bind(videoId, chunkIndex, key, manifest.updatedAt).run();
       result.chunks += 1;
