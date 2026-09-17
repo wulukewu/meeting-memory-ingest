@@ -397,6 +397,12 @@ export async function resetVideo(env: Env, videoId: string): Promise<boolean> {
 export async function upsertLegacyEntry(env: Env, videoId: string, entry: ManifestEntry): Promise<void> {
   await ensureStateSchema(env);
   const nowIso = entry.updatedAt || entry.completedAt || entry.failedAt || entry.startedAt || new Date().toISOString();
+  const wasProcessing = entry.status === "processing" || entry.status === "finalizing";
+  const migratedStatus = wasProcessing ? "failed" : entry.status;
+  const migratedFailedAt = wasProcessing ? new Date(0).toISOString() : entry.failedAt || null;
+  const migratedLastError = wasProcessing
+    ? "Migrated from legacy ai-memory runtime state; ready to resume."
+    : entry.lastError || null;
   await env.STATE_DB.prepare(
     `INSERT INTO videos (
       video_id,title,youtube_url,status,attempts,started_at,completed_at,failed_at,retry_after_at,
@@ -408,14 +414,14 @@ export async function upsertLegacyEntry(env: Env, videoId: string, entry: Manife
     videoId,
     entry.title,
     entry.youtubeUrl || `https://youtu.be/${videoId}`,
-    entry.status === "finalizing" ? "processing" : entry.status,
+    migratedStatus,
     entry.attempts || 0,
     entry.startedAt || null,
     entry.completedAt || null,
-    entry.failedAt || null,
+    migratedFailedAt,
     entry.retryAfterAt || null,
     entry.path || null,
-    entry.lastError || null,
+    migratedLastError,
     entry.transcriptionModel || env.GROQ_TRANSCRIPTION_MODEL,
     entry.summaryModel || (env.SUMMARY_ENABLED === "true" ? env.GROQ_SUMMARY_MODEL : null),
     entry.durationSeconds || null,
