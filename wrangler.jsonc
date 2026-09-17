@@ -2,11 +2,32 @@
   "$schema": "node_modules/wrangler/config-schema.json",
   "name": "meeting-memory-ingest",
   "main": "src/index.ts",
-  "compatibility_date": "2026-09-14",
+  "compatibility_date": "2026-09-18",
   "keep_vars": true,
   "triggers": {
     "crons": ["*/30 * * * *"]
   },
+  "d1_databases": [
+    {
+      "binding": "STATE_DB",
+      "database_name": "meeting-memory-ingest-state",
+      "database_id": "REPLACE_WITH_D1_DATABASE_ID",
+      "migrations_dir": "migrations"
+    }
+  ],
+  "r2_buckets": [
+    {
+      "binding": "WORK_BUCKET",
+      "bucket_name": "meeting-memory-ingest-work"
+    }
+  ],
+  "workflows": [
+    {
+      "name": "meeting-memory-finalize",
+      "binding": "FINALIZE_WORKFLOW",
+      "class_name": "FinalizeMeetingWorkflow"
+    }
+  ],
   "observability": {
     "logs": {
       "enabled": true,
