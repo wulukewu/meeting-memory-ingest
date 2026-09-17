@@ -1,0 +1,43 @@
+name: Production smoke
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  health:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    steps:
+      - name: Wait for Cloudflare production deploy
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          URL="https://meeting-memory-ingest.ai-memory.workers.dev/health"
+          EXPECTED='"pipelineVersion": "d1-r2-workflows-v1+dashboard-v1.1+favicon-v1"'
+
+          for attempt in $(seq 1 30); do
+            echo "Smoke attempt ${attempt}/30"
+            BODY="$(curl -fsS --max-time 15 "$URL" || true)"
+            if [[ "$BODY" == *"$EXPECTED"* ]] && [[ "$BODY" == *'"configured": true'* ]]; then
+              echo "$BODY"
+              echo "Production health check passed."
+              exit 0
+            fi
+
+            if [[ -n "$BODY" ]]; then
+              echo "Current /health response:"
+              echo "$BODY"
+            else
+              echo "Production endpoint is not reachable yet."
+            fi
+            sleep 10
+          done
+
+          echo "Production did not reach the expected healthy pipeline within the retry window." >&2
+          exit 1
