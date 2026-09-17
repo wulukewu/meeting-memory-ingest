@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { YOUTUBE_BOT_BLOCK_MARKER, youtubeResolverCooldownUntil } from "../src/github";
+import { YOUTUBE_BOT_BLOCK_MARKER, youtubeResolverCooldownUntil } from "../src/state";
 import type { Manifest } from "../src/types";
 
 function manifestWithVideos(videos: Manifest["videos"]): Manifest {
