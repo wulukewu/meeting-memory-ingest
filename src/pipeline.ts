@@ -23,6 +23,7 @@ import { dispatchYouTubeResolver } from "./resolver-dispatch";
 import { errorMessage, parsePositiveInt } from "./util";
 import { getVideo, getYouTubeAccessToken, listPlaylistVideos } from "./youtube";
 import { getStoredChunk, putStoredChunk } from "./work-store";
+import { migrateLegacyAiMemoryState } from "./legacy-migration";
 
 async function dispatchFinalization(env: Env, videoId: string): Promise<string> {
   const existing = await getManifestEntry(env, videoId);
@@ -59,6 +60,7 @@ function baseResult(trigger: TriggerKind): RunResult {
 }
 
 export async function runPlaylist(env: Env, trigger: TriggerKind = "cron"): Promise<RunResult> {
+  await migrateLegacyAiMemoryState(env);
   const result = baseResult(trigger);
   const accessToken = await getYouTubeAccessToken(env);
   const videos = await listPlaylistVideos(env, accessToken);
@@ -93,6 +95,7 @@ export async function runPlaylist(env: Env, trigger: TriggerKind = "cron"): Prom
 }
 
 export async function runSingleVideo(env: Env, videoId: string): Promise<RunResult> {
+  await migrateLegacyAiMemoryState(env);
   const result = baseResult("single");
   const accessToken = await getYouTubeAccessToken(env);
   const video = await getVideo(env, accessToken, videoId);
