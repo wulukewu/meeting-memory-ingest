@@ -1,4 +1,13 @@
+export interface FinalizeWorkflowParams {
+  videoId: string;
+}
+
 export interface Env {
+  // Cloudflare bindings
+  STATE_DB: D1Database;
+  WORK_BUCKET: R2Bucket;
+  FINALIZE_WORKFLOW: Workflow<FinalizeWorkflowParams>;
+
   // Worker secrets
   GROQ_API_KEY: string;
   YOUTUBE_CLIENT_ID: string;
@@ -102,7 +111,7 @@ export interface MeetingSummary {
   tags: string[];
 }
 
-export type ManifestStatus = "processing" | "waiting" | "completed" | "failed";
+export type ManifestStatus = "processing" | "waiting" | "finalizing" | "completed" | "failed";
 
 export interface ManifestEntry {
   status: ManifestStatus;
@@ -122,6 +131,8 @@ export interface ManifestEntry {
   totalChunks?: number;
   nextChunkIndex?: number;
   completedChunks?: number[];
+  finalizationId?: string;
+  updatedAt?: string;
 }
 
 export interface Manifest {
