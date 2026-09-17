@@ -4,6 +4,61 @@ import { errorMessage, parsePositiveInt, truncate } from "./util";
 
 export const YOUTUBE_BOT_BLOCK_MARKER = "[youtube_bot_blocked]";
 
+const STATE_SCHEMA_SQL = \`
+CREATE TABLE IF NOT EXISTS videos (
+  video_id TEXT PRIMARY KEY,
+  title TEXT NOT NULL,
+  youtube_url TEXT NOT NULL,
+  status TEXT NOT NULL CHECK (status IN ('processing','waiting','finalizing','completed','failed')),
+  attempts INTEGER NOT NULL DEFAULT 0,
+  started_at TEXT,
+  completed_at TEXT,
+  failed_at TEXT,
+  retry_after_at TEXT,
+  path TEXT,
+  last_error TEXT,
+  transcription_model TEXT,
+  summary_model TEXT,
+  duration_seconds INTEGER,
+  chunk_seconds INTEGER,
+  total_chunks INTEGER,
+  next_chunk_index INTEGER NOT NULL DEFAULT 0,
+  finalization_id TEXT,
+  updated_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS chunks (
+  video_id TEXT NOT NULL,
+  chunk_index INTEGER NOT NULL,
+  r2_key TEXT NOT NULL,
+  completed_at TEXT NOT NULL,
+  PRIMARY KEY (video_id, chunk_index),
+  FOREIGN KEY (video_id) REFERENCES videos(video_id) ON DELETE CASCADE
+);
+CREATE TABLE IF NOT EXISTS runtime_meta (
+  key TEXT PRIMARY KEY,
+  value TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_videos_status_updated ON videos(status, updated_at);
+CREATE INDEX IF NOT EXISTS idx_videos_retry_after ON videos(status, retry_after_at);
+CREATE INDEX IF NOT EXISTS idx_chunks_video ON chunks(video_id, chunk_index);
+\`;
+
+let schemaReady: Promise<void> | undefined;
+
+export async function ensureStateSchema(env: Env): Promise<void> {
+  if (!schemaReady) {
+    schemaReady = env.STATE_DB.exec(STATE_SCHEMA_SQL)
+      .then(() => undefined)
+      .catch((error) => {
+        schemaReady = undefined;
+        throw error;
+      });
+  }
+  await schemaReady;
+}
+
+
 type VideoRow = {
   video_id: string;
   title: string;
@@ -58,6 +113,7 @@ function rowToEntry(row: VideoRow, completedChunks: number[] = []): ManifestEntr
 }
 
 async function chunkIndexes(env: Env, videoId: string): Promise<number[]> {
+  await ensureStateSchema(env);
   const result = await env.STATE_DB.prepare(
     "SELECT chunk_index FROM chunks WHERE video_id = ? ORDER BY chunk_index",
   ).bind(videoId).all<{ chunk_index: number }>();
@@ -65,6 +121,7 @@ async function chunkIndexes(env: Env, videoId: string): Promise<number[]> {
 }
 
 export async function getManifestEntry(env: Env, videoId: string): Promise<ManifestEntry | undefined> {
+  await ensureStateSchema(env);
   const row = await env.STATE_DB.prepare("SELECT * FROM videos WHERE video_id = ?")
     .bind(videoId)
     .first<VideoRow>();
@@ -73,6 +130,7 @@ export async function getManifestEntry(env: Env, videoId: string): Promise<Manif
 }
 
 export async function loadManifest(env: Env): Promise<{ manifest: Manifest }> {
+  await ensureStateSchema(env);
   const [videoResult, chunkResult] = await Promise.all([
     env.STATE_DB.prepare("SELECT * FROM videos ORDER BY updated_at DESC").all<VideoRow>(),
     env.STATE_DB.prepare("SELECT video_id, chunk_index, r2_key, completed_at FROM chunks ORDER BY video_id, chunk_index")
@@ -105,6 +163,7 @@ export function youtubeResolverCooldownUntil(manifest: Manifest, now = Date.now(
 }
 
 async function insertNewClaim(env: Env, video: VideoRecord, entry: ManifestEntry, nowIso: string): Promise<boolean> {
+  await ensureStateSchema(env);
   const result = await env.STATE_DB.prepare(
     `INSERT OR IGNORE INTO videos (
       video_id,title,youtube_url,status,attempts,started_at,transcription_model,summary_model,
@@ -278,6 +337,7 @@ export async function markFinalizing(env: Env, videoId: string, workflowId: stri
 }
 
 export async function completeVideo(env: Env, video: VideoRecord, path: string): Promise<void> {
+  await ensureStateSchema(env);
   const nowIso = new Date().toISOString();
   await env.STATE_DB.prepare(
     `UPDATE videos SET status='completed', path=?, completed_at=?, failed_at=NULL,
@@ -297,12 +357,13 @@ export async function completeVideo(env: Env, video: VideoRecord, path: string):
 }
 
 export async function failVideo(env: Env, video: VideoRecord, error: unknown): Promise<void> {
+  await ensureStateSchema(env);
   const nowIso = new Date().toISOString();
   try {
     await env.STATE_DB.prepare(
       `UPDATE videos SET status='failed', failed_at=?, retry_after_at=NULL,
          last_error=?, finalization_id=NULL, title=?, youtube_url=?, updated_at=?
-       WHERE video_id=?`,
+       WHERE video_id=? AND status != 'completed'`,
     ).bind(
       nowIso,
       truncate(errorMessage(error), 1200),
@@ -317,10 +378,11 @@ export async function failVideo(env: Env, video: VideoRecord, error: unknown): P
 }
 
 export async function failVideoById(env: Env, videoId: string, error: unknown): Promise<void> {
+  await ensureStateSchema(env);
   const nowIso = new Date().toISOString();
   await env.STATE_DB.prepare(
     `UPDATE videos SET status='failed', failed_at=?, retry_after_at=NULL,
-       last_error=?, finalization_id=NULL, updated_at=? WHERE video_id=?`,
+       last_error=?, finalization_id=NULL, updated_at=? WHERE video_id=? AND status != 'completed'`,
   ).bind(nowIso, truncate(errorMessage(error), 1200), nowIso, videoId).run();
 }
 
@@ -333,6 +395,7 @@ export async function resetVideo(env: Env, videoId: string): Promise<boolean> {
 }
 
 export async function upsertLegacyEntry(env: Env, videoId: string, entry: ManifestEntry): Promise<void> {
+  await ensureStateSchema(env);
   const nowIso = entry.updatedAt || entry.completedAt || entry.failedAt || entry.startedAt || new Date().toISOString();
   await env.STATE_DB.prepare(
     `INSERT INTO videos (
@@ -340,14 +403,7 @@ export async function upsertLegacyEntry(env: Env, videoId: string, entry: Manife
       path,last_error,transcription_model,summary_model,duration_seconds,chunk_seconds,total_chunks,
       next_chunk_index,finalization_id,updated_at
     ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
-    ON CONFLICT(video_id) DO UPDATE SET
-      title=excluded.title,youtube_url=excluded.youtube_url,status=excluded.status,attempts=excluded.attempts,
-      started_at=excluded.started_at,completed_at=excluded.completed_at,failed_at=excluded.failed_at,
-      retry_after_at=excluded.retry_after_at,path=excluded.path,last_error=excluded.last_error,
-      transcription_model=excluded.transcription_model,summary_model=excluded.summary_model,
-      duration_seconds=excluded.duration_seconds,chunk_seconds=excluded.chunk_seconds,
-      total_chunks=excluded.total_chunks,next_chunk_index=excluded.next_chunk_index,
-      finalization_id=excluded.finalization_id,updated_at=excluded.updated_at`,
+    ON CONFLICT(video_id) DO NOTHING`,
   ).bind(
     videoId,
     entry.title,
@@ -369,4 +425,21 @@ export async function upsertLegacyEntry(env: Env, videoId: string, entry: Manife
     null,
     nowIso,
   ).run();
+}
+
+
+export async function runtimeMeta(env: Env, key: string): Promise<string | undefined> {
+  await ensureStateSchema(env);
+  const row = await env.STATE_DB.prepare("SELECT value FROM runtime_meta WHERE key = ?")
+    .bind(key)
+    .first<{ value: string }>();
+  return row?.value;
+}
+
+export async function setRuntimeMeta(env: Env, key: string, value: string): Promise<void> {
+  await ensureStateSchema(env);
+  const nowIso = new Date().toISOString();
+  await env.STATE_DB.prepare(
+    "INSERT INTO runtime_meta (key,value,updated_at) VALUES (?,?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at",
+  ).bind(key, value, nowIso).run();
 }
