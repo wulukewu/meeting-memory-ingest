@@ -9,16 +9,12 @@
   },
   "d1_databases": [
     {
-      "binding": "STATE_DB",
-      "database_name": "meeting-memory-ingest-state",
-      "database_id": "REPLACE_WITH_D1_DATABASE_ID",
-      "migrations_dir": "migrations"
+      "binding": "STATE_DB"
     }
   ],
   "r2_buckets": [
     {
-      "binding": "WORK_BUCKET",
-      "bucket_name": "meeting-memory-ingest-work"
+      "binding": "WORK_BUCKET"
     }
   ],
   "workflows": [
