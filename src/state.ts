@@ -4,7 +4,7 @@ import { errorMessage, parsePositiveInt, truncate } from "./util";
 
 export const YOUTUBE_BOT_BLOCK_MARKER = "[youtube_bot_blocked]";
 
-const STATE_SCHEMA_SQL = \`
+const STATE_SCHEMA_SQL = `
 CREATE TABLE IF NOT EXISTS videos (
   video_id TEXT PRIMARY KEY,
   title TEXT NOT NULL,
@@ -42,7 +42,7 @@ CREATE TABLE IF NOT EXISTS runtime_meta (
 CREATE INDEX IF NOT EXISTS idx_videos_status_updated ON videos(status, updated_at);
 CREATE INDEX IF NOT EXISTS idx_videos_retry_after ON videos(status, retry_after_at);
 CREATE INDEX IF NOT EXISTS idx_chunks_video ON chunks(video_id, chunk_index);
-\`;
+`;
 
 let schemaReady: Promise<void> | undefined;
 
