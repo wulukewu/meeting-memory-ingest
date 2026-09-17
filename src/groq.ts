@@ -85,9 +85,6 @@ function normalizeTranscript(raw: {
       noSpeechProb: segment.no_speech_prob,
       compressionRatio: segment.compression_ratio,
     }))
-    // Be deliberately conservative: only discard segments Whisper itself marks
-    // as overwhelmingly likely to be non-speech. This targets repeated silence
-    // hallucinations without trying to second-guess low-confidence real speech.
     .filter((segment) => segment.noSpeechProb == null || segment.noSpeechProb < 0.8);
 
   if (!raw.text && rawSegments.length === 0) throw new Error("Groq returned an empty transcript");
@@ -128,9 +125,6 @@ export async function transcribeAudioUpload(
     throw new Error("resolver transcription upload must use multipart/form-data");
   }
 
-  // The incoming multipart stream is intentionally forwarded without parsing or
-  // buffering the audio in the Worker. A request stream cannot be replayed, so
-  // rate limits are surfaced with their retry-after value to the resumable queue.
   const response = await groqFetch(
     env,
     "audio/transcriptions",
@@ -144,7 +138,7 @@ export async function transcribeAudioUpload(
   return normalizeTranscript(await response.json());
 }
 
-interface PartialSummary {
+export interface PartialSummary {
   summary: string;
   decisions: string[];
   actionItems: Array<{ owner?: string; task: string }>;
@@ -219,46 +213,52 @@ function normalizePartial(value: Partial<PartialSummary>): PartialSummary {
   };
 }
 
-export async function summarizeMeeting(
+export function summaryInputChunks(transcript: TranscriptResult): string[] {
+  return splitByApproxChars(transcriptLines(transcript), 5200);
+}
+
+export function fallbackMeetingSummary(video: VideoRecord): MeetingSummary {
+  const category = inferCategoryFromTitle(video.title);
+  return {
+    title: toTaiwanTraditional(video.title),
+    category,
+    summary: "",
+    decisions: [],
+    actionItems: [],
+    topics: [],
+    tags: ["meeting", category],
+  };
+}
+
+export async function summarizeTranscriptChunk(
   env: Env,
   video: VideoRecord,
-  transcript: TranscriptResult,
+  chunk: string,
+  index: number,
+  total: number,
+): Promise<PartialSummary> {
+  const partial = await chatJson<PartialSummary>(
+    env,
+    [
+      "你正在整理會議逐字稿。只輸出有效 JSON，不要 Markdown。",
+      "請以繁體中文為主；原本就是英文的技術名詞、人名、產品名、程式名稱可保留英文，不要強制翻譯。",
+      "不要把不確定的內容補猜成事實。保留技術名詞、人名與時間戳。",
+      "只有逐字稿中明確表達為決定或待辦的內容，才能列入 decisions/actionItems；討論中的可能性、建議與探索不要升格成待辦。",
+      "JSON keys 必須是 summary, decisions, actionItems, topics, tags。",
+      "actionItems 元素格式 {owner?: string, task: string}；topics 元素格式 {timestamp?: string, topic: string}。",
+    ].join("\n"),
+    `影片標題：${video.title}\n這是第 ${index + 1}/${total} 段逐字稿：\n\n${chunk}`,
+    1400,
+  );
+  return normalizePartial(partial);
+}
+
+export async function combineMeetingSummaries(
+  env: Env,
+  video: VideoRecord,
+  partials: PartialSummary[],
 ): Promise<MeetingSummary> {
   const fallbackCategory = inferCategoryFromTitle(video.title);
-  if (!parseBoolean(env.SUMMARY_ENABLED, true)) {
-    return {
-      title: toTaiwanTraditional(video.title),
-      category: fallbackCategory,
-      summary: "",
-      decisions: [],
-      actionItems: [],
-      topics: [],
-      tags: ["meeting", fallbackCategory],
-    };
-  }
-
-  // Keep each free-tier request comfortably below the 8K TPM ceiling. The
-  // retry logic above honors Groq's Retry-After header between chunks.
-  const chunks = splitByApproxChars(transcriptLines(transcript), 5200);
-  const partials: PartialSummary[] = [];
-
-  for (let i = 0; i < chunks.length; i += 1) {
-    const partial = await chatJson<PartialSummary>(
-      env,
-      [
-        "你正在整理會議逐字稿。只輸出有效 JSON，不要 Markdown。",
-        "請以繁體中文為主；原本就是英文的技術名詞、人名、產品名、程式名稱可保留英文，不要強制翻譯。",
-        "不要把不確定的內容補猜成事實。保留技術名詞、人名與時間戳。",
-        "只有逐字稿中明確表達為決定或待辦的內容，才能列入 decisions/actionItems；討論中的可能性、建議與探索不要升格成待辦。",
-        "JSON keys 必須是 summary, decisions, actionItems, topics, tags。",
-        "actionItems 元素格式 {owner?: string, task: string}；topics 元素格式 {timestamp?: string, topic: string}。",
-      ].join("\n"),
-      `影片標題：${video.title}\n這是第 ${i + 1}/${chunks.length} 段逐字稿：\n\n${chunks[i]}`,
-      1400,
-    );
-    partials.push(normalizePartial(partial));
-  }
-
   const final = await chatJson<MeetingSummary>(
     env,
     [
@@ -303,4 +303,18 @@ export async function summarizeMeeting(
       ? final.tags.filter((x): x is string => typeof x === "string").map(toTaiwanTraditional)
       : ["meeting", fallbackCategory],
   };
+}
+
+export async function summarizeMeeting(
+  env: Env,
+  video: VideoRecord,
+  transcript: TranscriptResult,
+): Promise<MeetingSummary> {
+  if (!parseBoolean(env.SUMMARY_ENABLED, true)) return fallbackMeetingSummary(video);
+  const chunks = summaryInputChunks(transcript);
+  const partials: PartialSummary[] = [];
+  for (let i = 0; i < chunks.length; i += 1) {
+    partials.push(await summarizeTranscriptChunk(env, video, chunks[i], i, chunks.length));
+  }
+  return combineMeetingSummaries(env, video, partials);
 }
