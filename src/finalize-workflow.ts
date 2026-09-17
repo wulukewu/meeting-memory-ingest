@@ -4,7 +4,6 @@ import type {
   Env,
   FinalizeWorkflowParams,
   MeetingSummary,
-  PartialSummary as Never,
   TranscriptResult,
 } from "./types";
 import type { PartialSummary } from "./groq";
