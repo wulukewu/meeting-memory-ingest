@@ -1,11 +1,14 @@
 import type { Env, ScheduledController, WaitUntilContext } from "./types";
 import { handleDashboardRequest } from "./dashboard";
 import { faviconResponse } from "./favicon";
-import { loadManifest, makeRetryableNow } from "./github";
+import { migrateLegacyAiMemoryState } from "./legacy-migration";
+import { getManifestEntry, loadManifest, makeRetryableNow } from "./state";
 import { handleResolverCallback, handleResolverTranscription, runPlaylist, runSingleVideo } from "./pipeline";
 import { jsonResponse } from "./util";
 
-const PIPELINE_VERSION = "resumable-chunks-v1+dashboard-v1.1+favicon-v1";
+export { FinalizeMeetingWorkflow } from "./finalize-workflow";
+
+const PIPELINE_VERSION = "d1-r2-workflows-v1+dashboard-v1.1+favicon-v1";
 
 function isAdmin(request: Request, env: Env): boolean {
   const auth = request.headers.get("authorization");
@@ -27,7 +30,17 @@ function configStatus(env: Env) {
     ...(env.YOUTUBE_PLAYLIST_ID ? [] : ["YOUTUBE_PLAYLIST_ID"]),
     ...(env.WORKER_PUBLIC_URL ? [] : ["WORKER_PUBLIC_URL"]),
   ];
-  return { configured: missingSecrets.length === 0 && missingVars.length === 0, missingSecrets, missingVars };
+  const missingBindings = [
+    ...(env.STATE_DB ? [] : ["STATE_DB"]),
+    ...(env.WORK_BUCKET ? [] : ["WORK_BUCKET"]),
+    ...(env.FINALIZE_WORKFLOW ? [] : ["FINALIZE_WORKFLOW"]),
+  ];
+  return {
+    configured: missingSecrets.length === 0 && missingVars.length === 0 && missingBindings.length === 0,
+    missingSecrets,
+    missingVars,
+    missingBindings,
+  };
 }
 
 function configError(env: Env): Response | null {
@@ -63,6 +76,10 @@ async function handleFetch(request: Request, env: Env, ctx: WaitUntilContext): P
   const notConfigured = configError(env);
   if (notConfigured) return notConfigured;
 
+  if (request.method === "POST" && url.pathname === "/admin/migrate-legacy-state") {
+    return jsonResponse(await migrateLegacyAiMemoryState(env));
+  }
+
   if (request.method === "POST" && url.pathname === "/resolver/transcribe") {
     const videoId = request.headers.get("x-video-id")?.trim() || "";
     if (!/^[A-Za-z0-9_-]{6,20}$/.test(videoId)) return jsonResponse({ error: "invalid or missing x-video-id" }, 400);
@@ -80,12 +97,20 @@ async function handleFetch(request: Request, env: Env, ctx: WaitUntilContext): P
   }
 
   if (request.method === "POST" && url.pathname === "/resolver/callback") {
-    const payload = (await request.json()) as { videoId?: string; audioUrl?: string; error?: string };
+    const payload = (await request.json()) as {
+      videoId?: string;
+      audioUrl?: string;
+      error?: string;
+      errorCode?: string;
+      retryAfterSeconds?: number;
+    };
     if (!payload.videoId) return jsonResponse({ error: "missing videoId" }, 400);
     const result = await handleResolverCallback(env, {
       videoId: payload.videoId,
       ...(payload.audioUrl ? { audioUrl: payload.audioUrl } : {}),
       ...(payload.error ? { error: payload.error } : {}),
+      ...(payload.errorCode ? { errorCode: payload.errorCode } : {}),
+      ...(Number.isFinite(payload.retryAfterSeconds) ? { retryAfterSeconds: payload.retryAfterSeconds } : {}),
     });
     return jsonResponse(result);
   }
@@ -100,11 +125,10 @@ async function handleFetch(request: Request, env: Env, ctx: WaitUntilContext): P
     const videoId = url.pathname.slice("/retry/".length).trim();
     if (!/^[A-Za-z0-9_-]{6,20}$/.test(videoId)) return jsonResponse({ error: "invalid video id" }, 400);
 
-    const { manifest } = await loadManifest(env);
-    const existing = manifest.videos[videoId];
-    if (existing?.status === "processing") {
+    const existing = await getManifestEntry(env, videoId);
+    if (existing?.status === "processing" || existing?.status === "finalizing") {
       return jsonResponse(
-        { error: "video is already processing; retry did not reset the active claim", videoId, status: existing.status },
+        { error: "video is already active; retry did not reset the active claim", videoId, status: existing.status },
         409,
       );
     }

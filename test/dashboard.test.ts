@@ -13,7 +13,7 @@ function video(privacyStatus: string): VideoRecord {
   };
 }
 
-function manifest(status?: "processing" | "waiting" | "completed" | "failed"): Manifest {
+function manifest(status?: "processing" | "waiting" | "finalizing" | "completed" | "failed"): Manifest {
   return {
     version: 1,
     updatedAt: "2026-09-15T00:00:00Z",
@@ -47,6 +47,12 @@ describe("dashboard status mapping", () => {
   it("shows an untracked private video as not queued", () => {
     const row = buildDashboardRow(video("private"), manifest());
     expect(row.group).toBe("private");
+  });
+
+  it("shows durable finalization as active without asking for a retry", () => {
+    const row = buildDashboardRow(video("unlisted"), manifest("finalizing"));
+    expect(row.group).toBe("processing");
+    expect(row.statusLabel).toBe("整理摘要中");
   });
 
   it("preserves manifest waiting state even if video remains unlisted", () => {
