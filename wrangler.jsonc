@@ -5,7 +5,7 @@
   "compatibility_date": "2026-09-18",
   "keep_vars": true,
   "triggers": {
-    "crons": ["* * * * *"]
+    "crons": ["*/30 * * * *"]
   },
   "d1_databases": [
     {
