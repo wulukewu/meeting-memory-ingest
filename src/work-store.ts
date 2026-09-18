@@ -1,4 +1,5 @@
 import type { Env, StoredTranscriptChunk } from "./types";
+import type { PartialSummary } from "./groq";
 import { ensureStateSchema } from "./state";
 
 const MAX_D1_CHUNK_BYTES = 1_900_000;
@@ -63,6 +64,7 @@ export async function putSummaryInputs(env: Env, videoId: string, inputs: string
   await ensureStateSchema(env);
   const nowIso = new Date().toISOString();
   await env.QUEUE_DB.batch([
+    env.QUEUE_DB.prepare("DELETE FROM summary_outputs WHERE video_id = ?").bind(videoId),
     env.QUEUE_DB.prepare("DELETE FROM summary_inputs WHERE video_id = ?").bind(videoId),
     ...inputs.map((input, index) =>
       env.QUEUE_DB.prepare(
@@ -81,9 +83,53 @@ export async function getSummaryInput(env: Env, videoId: string, index: number):
   return row.input_text;
 }
 
+export async function putSummaryOutput(
+  env: Env,
+  videoId: string,
+  index: number,
+  value: PartialSummary,
+): Promise<void> {
+  await ensureStateSchema(env);
+  const nowIso = new Date().toISOString();
+  await env.QUEUE_DB.prepare(
+    `INSERT INTO summary_outputs (video_id,part_index,payload_json,completed_at)
+     VALUES (?,?,?,?)
+     ON CONFLICT(video_id,part_index) DO UPDATE SET
+       payload_json=excluded.payload_json,
+       completed_at=excluded.completed_at`,
+  ).bind(videoId, index, JSON.stringify(value), nowIso).run();
+}
+
+export async function getSummaryOutputs(
+  env: Env,
+  videoId: string,
+  totalParts: number,
+): Promise<PartialSummary[]> {
+  await ensureStateSchema(env);
+  const result = await env.QUEUE_DB.prepare(
+    "SELECT part_index, payload_json FROM summary_outputs WHERE video_id = ? ORDER BY part_index",
+  ).bind(videoId).all<{ part_index: number; payload_json: string }>();
+
+  if (result.results.length !== totalParts) {
+    throw new Error(
+      `expected ${totalParts} summary outputs for ${videoId}, found ${result.results.length}`,
+    );
+  }
+
+  return result.results.map((row, expectedIndex) => {
+    if (row.part_index !== expectedIndex) {
+      throw new Error(
+        `summary output index mismatch for ${videoId}: expected ${expectedIndex}, got ${row.part_index}`,
+      );
+    }
+    return JSON.parse(row.payload_json) as PartialSummary;
+  });
+}
+
 export async function cleanupVideoWork(env: Env, videoId: string): Promise<void> {
   await ensureStateSchema(env);
   await env.QUEUE_DB.batch([
+    env.QUEUE_DB.prepare("DELETE FROM summary_outputs WHERE video_id = ?").bind(videoId),
     env.QUEUE_DB.prepare("DELETE FROM summary_inputs WHERE video_id = ?").bind(videoId),
     env.QUEUE_DB.prepare("DELETE FROM transcript_chunks WHERE video_id = ?").bind(videoId),
   ]);
