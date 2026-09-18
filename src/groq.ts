@@ -166,11 +166,14 @@ async function chatJson<T>(
       },
     ],
   };
+  // Workflow summary retries must be handled by step.do(), not by sleeping
+  // inside a single Workflow invocation. One API attempt keeps each durable
+  // step short and lets Cloudflare hibernate/retry it safely.
   const response = await groqFetch(env, "chat/completions", {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify(body),
-  });
+  }, 1);
   const payload = (await response.json()) as { choices?: Array<{ message?: { content?: string } }> };
   const content = payload.choices?.[0]?.message?.content;
   if (!content) throw new Error("Groq summary model returned no content");

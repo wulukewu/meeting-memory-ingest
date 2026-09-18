@@ -3,12 +3,18 @@ import { handleDashboardRequest } from "./dashboard";
 import { faviconResponse } from "./favicon";
 import { migrateLegacyAiMemoryState } from "./legacy-migration";
 import { getManifestEntry, loadManifest, makeRetryableNow } from "./state";
-import { handleResolverCallback, handleResolverTranscription, runPlaylist, runSingleVideo } from "./pipeline";
+import {
+  handleResolverCallback,
+  handleResolverTranscription,
+  recoverFinalization,
+  runPlaylist,
+  runSingleVideo,
+} from "./pipeline";
 import { jsonResponse } from "./util";
 
 export { FinalizeMeetingWorkflow } from "./finalize-workflow";
 
-const PIPELINE_VERSION = "d1-workflows-v1.1+dashboard-v1.1+favicon-v1";
+const PIPELINE_VERSION = "d1-workflows-v1.2+dashboard-v1.1+favicon-v1";
 
 function isAdmin(request: Request, env: Env): boolean {
   const auth = request.headers.get("authorization");
@@ -96,6 +102,14 @@ async function handleFetch(request: Request, env: Env, ctx: WaitUntilContext): P
 
   if (request.method === "POST" && url.pathname === "/admin/migrate-legacy-state") {
     return jsonResponse(await migrateLegacyAiMemoryState(env));
+  }
+
+  if (request.method === "POST" && url.pathname.startsWith("/admin/recover-finalization/")) {
+    const videoId = url.pathname.slice("/admin/recover-finalization/".length).trim();
+    if (!/^[A-Za-z0-9_-]{6,20}$/.test(videoId)) {
+      return jsonResponse({ error: "invalid video id" }, 400);
+    }
+    return jsonResponse(await recoverFinalization(env, videoId));
   }
 
   if (request.method === "POST" && url.pathname === "/resolver/transcribe") {
