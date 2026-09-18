@@ -13,6 +13,7 @@ import { buildTranscriptPath, renderMeetingMarkdown } from "./markdown";
 import { completeVideo, failVideoById, getManifestEntry } from "./state";
 import {
   cleanupVideoWork,
+  getFinalizationProgress,
   getStoredChunks,
   getSummaryInput,
   getSummaryOutputs,
@@ -71,7 +72,7 @@ const PUBLISH_STEP_OPTIONS = {
 
 export class FinalizeMeetingWorkflow extends WorkflowEntrypoint<Env, FinalizeWorkflowParams> {
   async run(event: WorkflowEvent<FinalizeWorkflowParams>, step: WorkflowStep) {
-    const { videoId, workflowId } = event.payload;
+    const { videoId, workflowId, resumeSummaries = false } = event.payload;
 
     // Workflow instances created before finalization ownership was introduced
     // do not carry workflowId in their persisted event payload. A legacy
@@ -99,13 +100,28 @@ export class FinalizeMeetingWorkflow extends WorkflowEntrypoint<Env, FinalizeWor
         );
 
         let summaryParts = 0;
+        let preservedSummaries = false;
         if (parseBoolean(this.env.SUMMARY_ENABLED, true)) {
           const inputs = summaryInputChunks(transcript);
           summaryParts = inputs.length;
-          await putSummaryInputs(this.env, videoId, inputs);
+
+          if (resumeSummaries) {
+            const progress = await getFinalizationProgress(this.env, videoId);
+            if (
+              progress.summaryInputs !== summaryParts ||
+              progress.summaryOutputs !== summaryParts
+            ) {
+              throw new Error(
+                `cannot resume final combine for ${videoId}: expected ${summaryParts} completed summaries, found ${progress.summaryOutputs}/${progress.summaryInputs}`,
+              );
+            }
+            preservedSummaries = true;
+          } else {
+            await putSummaryInputs(this.env, videoId, inputs);
+          }
         }
 
-        return { alreadyCompleted: false, path: "", summaryParts };
+        return { alreadyCompleted: false, path: "", summaryParts, preservedSummaries };
       });
 
       if (prepared.alreadyCompleted) {
@@ -117,7 +133,7 @@ export class FinalizeMeetingWorkflow extends WorkflowEntrypoint<Env, FinalizeWor
         return getVideo(this.env, accessToken, videoId);
       });
 
-      if (parseBoolean(this.env.SUMMARY_ENABLED, true)) {
+      if (parseBoolean(this.env.SUMMARY_ENABLED, true) && !prepared.preservedSummaries) {
         for (let index = 0; index < prepared.summaryParts; index += 1) {
           const input = await step.do(
             `load summary input ${index + 1}`,

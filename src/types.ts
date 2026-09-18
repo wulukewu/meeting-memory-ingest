@@ -1,6 +1,7 @@
 export interface FinalizeWorkflowParams {
   videoId: string;
   workflowId: string;
+  resumeSummaries?: boolean;
 }
 
 export interface Env {
