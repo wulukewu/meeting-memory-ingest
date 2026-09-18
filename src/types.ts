@@ -1,5 +1,6 @@
 export interface FinalizeWorkflowParams {
   videoId: string;
+  workflowId: string;
 }
 
 export interface Env {
