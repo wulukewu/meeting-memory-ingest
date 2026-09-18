@@ -15,7 +15,7 @@ import { getFinalizationProgress } from "./work-store";
 
 export { FinalizeMeetingWorkflow } from "./finalize-workflow";
 
-const PIPELINE_VERSION = "d1-workers-ai-v1.3+dashboard-v1.1+favicon-v1";
+const PIPELINE_VERSION = "d1-workers-ai-v1.4+dashboard-v1.1+favicon-v1";
 
 function isAdmin(request: Request, env: Env): boolean {
   const auth = request.headers.get("authorization");
