@@ -22,16 +22,20 @@ import {
 import { dispatchYouTubeResolver } from "./resolver-dispatch";
 import { errorMessage, parsePositiveInt } from "./util";
 import { getVideo, getYouTubeAccessToken, listPlaylistVideos } from "./youtube";
-import { getStoredChunk, putStoredChunk } from "./work-store";
+import { getFinalizationProgress, getStoredChunk, putStoredChunk } from "./work-store";
 import { migrateLegacyAiMemoryState } from "./legacy-migration";
 
-async function createFinalizationWorkflow(env: Env, videoId: string): Promise<string> {
+async function createFinalizationWorkflow(
+  env: Env,
+  videoId: string,
+  resumeSummaries = false,
+): Promise<string> {
   const workflowId = `finalize-${videoId}-${crypto.randomUUID()}`;
   await markFinalizing(env, videoId, workflowId);
   try {
     await env.FINALIZE_WORKFLOW.create({
       id: workflowId,
-      params: { videoId, workflowId },
+      params: { videoId, workflowId, resumeSummaries },
     });
     return workflowId;
   } catch (error) {
@@ -75,7 +79,10 @@ export async function recoverFinalization(
     }
   }
 
-  const workflowId = await createFinalizationWorkflow(env, videoId);
+  const progress = await getFinalizationProgress(env, videoId);
+  const resumeSummaries =
+    progress.summaryInputs > 0 && progress.summaryInputs === progress.summaryOutputs;
+  const workflowId = await createFinalizationWorkflow(env, videoId, resumeSummaries);
   return { videoId, status: "finalizing", workflowId };
 }
 
