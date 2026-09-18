@@ -1,4 +1,4 @@
-name: Post-combine snapshot
+name: Final combine recovery v1.4
 
 on:
   push:
@@ -15,11 +15,22 @@ jobs:
       WORKER_ADMIN_TOKEN: ${{ secrets.WORKER_ADMIN_TOKEN }}
       BASE_URL: https://meeting-memory-ingest.ai-memory.workers.dev
     steps:
-      - name: Snapshot
+      - name: Restart remaining finalizers
         shell: bash
         run: |
           set -euo pipefail
-          sleep 15
+          for VIDEO_ID in GIVD1Am8zkY -oyv8ampS-0 b3jV7HzuR9c fjLxk0sKD5c; do
+            curl -fsS --max-time 60 -X POST \
+              -H "Authorization: Bearer ${WORKER_ADMIN_TOKEN}" \
+              "${BASE_URL}/admin/recover-finalization/${VIDEO_ID}"
+            echo
+          done
+
+      - name: Snapshot after recovery
+        shell: bash
+        run: |
+          set -euo pipefail
+          sleep 20
           curl -fsS --max-time 60 \
             -H "Authorization: Bearer ${WORKER_ADMIN_TOKEN}" \
             "${BASE_URL}/status" \
