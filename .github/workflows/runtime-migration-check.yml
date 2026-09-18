@@ -4,6 +4,8 @@ on:
   push:
     branches: [ops/runtime-migration-check]
 
+# 14:08 verification
+
 permissions:
   contents: read
 
