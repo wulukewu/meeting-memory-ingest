@@ -26,23 +26,38 @@ CREATE TABLE IF NOT EXISTS videos (
   finalization_id TEXT,
   updated_at TEXT NOT NULL
 );
-CREATE TABLE IF NOT EXISTS chunks (
+
+CREATE TABLE IF NOT EXISTS transcript_chunks (
   video_id TEXT NOT NULL,
   chunk_index INTEGER NOT NULL,
-  r2_key TEXT NOT NULL,
+  payload_json TEXT NOT NULL,
+  payload_bytes INTEGER NOT NULL,
   completed_at TEXT NOT NULL,
   PRIMARY KEY (video_id, chunk_index),
   FOREIGN KEY (video_id) REFERENCES videos(video_id) ON DELETE CASCADE
 );
+
+CREATE TABLE IF NOT EXISTS summary_inputs (
+  video_id TEXT NOT NULL,
+  part_index INTEGER NOT NULL,
+  input_text TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  PRIMARY KEY (video_id, part_index),
+  FOREIGN KEY (video_id) REFERENCES videos(video_id) ON DELETE CASCADE
+);
+
 CREATE TABLE IF NOT EXISTS runtime_meta (
   key TEXT PRIMARY KEY,
   value TEXT NOT NULL,
   updated_at TEXT NOT NULL
 );
+
 CREATE INDEX IF NOT EXISTS idx_videos_status_updated ON videos(status, updated_at);
 CREATE INDEX IF NOT EXISTS idx_videos_retry_after ON videos(status, retry_after_at);
-CREATE INDEX IF NOT EXISTS idx_chunks_video ON chunks(video_id, chunk_index);
+CREATE INDEX IF NOT EXISTS idx_transcript_chunks_video ON transcript_chunks(video_id, chunk_index);
+CREATE INDEX IF NOT EXISTS idx_summary_inputs_video ON summary_inputs(video_id, part_index);
 `;
+
 
 let schemaReady: Promise<void> | undefined;
 
@@ -81,12 +96,7 @@ type VideoRow = {
   updated_at: string;
 };
 
-type ChunkRow = {
-  video_id: string;
-  chunk_index: number;
-  r2_key: string;
-  completed_at: string;
-};
+type ChunkRow = { video_id: string; chunk_index: number; completed_at: string };
 
 function rowToEntry(row: VideoRow, completedChunks: number[] = []): ManifestEntry {
   return {
@@ -115,7 +125,7 @@ function rowToEntry(row: VideoRow, completedChunks: number[] = []): ManifestEntr
 async function chunkIndexes(env: Env, videoId: string): Promise<number[]> {
   await ensureStateSchema(env);
   const result = await env.QUEUE_DB.prepare(
-    "SELECT chunk_index FROM chunks WHERE video_id = ? ORDER BY chunk_index",
+    "SELECT chunk_index FROM transcript_chunks WHERE video_id = ? ORDER BY chunk_index",
   ).bind(videoId).all<{ chunk_index: number }>();
   return result.results.map((row) => row.chunk_index);
 }
@@ -133,7 +143,7 @@ export async function loadManifest(env: Env): Promise<{ manifest: Manifest }> {
   await ensureStateSchema(env);
   const [videoResult, chunkResult] = await Promise.all([
     env.QUEUE_DB.prepare("SELECT * FROM videos ORDER BY updated_at DESC").all<VideoRow>(),
-    env.QUEUE_DB.prepare("SELECT video_id, chunk_index, r2_key, completed_at FROM chunks ORDER BY video_id, chunk_index")
+    env.QUEUE_DB.prepare("SELECT video_id, chunk_index, completed_at FROM transcript_chunks ORDER BY video_id, chunk_index")
       .all<ChunkRow>(),
   ]);
   const byVideo = new Map<string, number[]>();
@@ -276,7 +286,6 @@ export async function recordChunkCompleted(
   env: Env,
   videoId: string,
   chunkIndex: number,
-  r2Key: string,
 ): Promise<ManifestEntry> {
   const existing = await getManifestEntry(env, videoId);
   if (!existing || existing.status !== "processing") throw new Error(`video ${videoId} is not processing`);
@@ -284,10 +293,6 @@ export async function recordChunkCompleted(
   if (chunkIndex < 0 || chunkIndex >= totalChunks) throw new Error(`invalid chunk index ${chunkIndex}/${totalChunks}`);
 
   const nowIso = new Date().toISOString();
-  await env.QUEUE_DB.prepare(
-    "INSERT OR REPLACE INTO chunks (video_id,chunk_index,r2_key,completed_at) VALUES (?,?,?,?)",
-  ).bind(videoId, chunkIndex, r2Key, nowIso).run();
-
   const completedChunks = normalizedCompletedChunks(totalChunks, [...(existing.completedChunks || []), chunkIndex]);
   const nextChunkIndex = nextPendingChunk(totalChunks, completedChunks);
   await env.QUEUE_DB.prepare(
@@ -389,8 +394,11 @@ export async function failVideoById(env: Env, videoId: string, error: unknown): 
 export async function resetVideo(env: Env, videoId: string): Promise<boolean> {
   const existing = await getManifestEntry(env, videoId);
   if (!existing) return false;
-  await env.QUEUE_DB.prepare("DELETE FROM chunks WHERE video_id = ?").bind(videoId).run();
-  await env.QUEUE_DB.prepare("DELETE FROM videos WHERE video_id = ?").bind(videoId).run();
+  await env.QUEUE_DB.batch([
+    env.QUEUE_DB.prepare("DELETE FROM summary_inputs WHERE video_id = ?").bind(videoId),
+    env.QUEUE_DB.prepare("DELETE FROM transcript_chunks WHERE video_id = ?").bind(videoId),
+    env.QUEUE_DB.prepare("DELETE FROM videos WHERE video_id = ?").bind(videoId),
+  ]);
   return true;
 }
 

@@ -8,7 +8,7 @@ import { jsonResponse } from "./util";
 
 export { FinalizeMeetingWorkflow } from "./finalize-workflow";
 
-const PIPELINE_VERSION = "d1-r2-workflows-v1+dashboard-v1.1+favicon-v1";
+const PIPELINE_VERSION = "d1-workflows-v1+dashboard-v1.1+favicon-v1";
 
 function isAdmin(request: Request, env: Env): boolean {
   const auth = request.headers.get("authorization");
@@ -32,7 +32,6 @@ function configStatus(env: Env) {
   ];
   const missingBindings = [
     ...(env.QUEUE_DB ? [] : ["QUEUE_DB"]),
-    ...(env.TRANSCRIPT_WORK ? [] : ["TRANSCRIPT_WORK"]),
     ...(env.FINALIZE_WORKFLOW ? [] : ["FINALIZE_WORKFLOW"]),
   ];
   return {

@@ -170,7 +170,7 @@ export async function handleResolverTranscription(
 
   if (cached) {
     if (!(entry.completedChunks || []).includes(chunkIndex)) {
-      updatedEntry = await recordChunkCompleted(env, videoId, chunkIndex, `work/${videoId}/chunk-${String(chunkIndex).padStart(4, "0")}.json`);
+      updatedEntry = await recordChunkCompleted(env, videoId, chunkIndex);
     }
   } else {
     const expected = entry.nextChunkIndex || 0;
@@ -185,8 +185,8 @@ export async function handleResolverTranscription(
         offsetSeconds: chunkIndex * chunkSeconds,
         transcript,
       };
-      const key = await putStoredChunk(env, chunk);
-      updatedEntry = await recordChunkCompleted(env, videoId, chunkIndex, key);
+      await putStoredChunk(env, chunk);
+      updatedEntry = await recordChunkCompleted(env, videoId, chunkIndex);
     } catch (error) {
       if (error instanceof GroqRateLimitError) {
         await deferVideo(env, video, error.retryAfterSeconds, error);

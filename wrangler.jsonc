@@ -9,12 +9,9 @@
   },
   "d1_databases": [
     {
-      "binding": "QUEUE_DB"
-    }
-  ],
-  "r2_buckets": [
-    {
-      "binding": "TRANSCRIPT_WORK"
+      "binding": "QUEUE_DB",
+      "database_name": "meeting-memory-ingest-queue-db",
+      "database_id": "ec0cf558-fce5-474c-835f-90bb4e344403"
     }
   ],
   "workflows": [

@@ -5,7 +5,6 @@ export interface FinalizeWorkflowParams {
 export interface Env {
   // Cloudflare bindings
   QUEUE_DB: D1Database;
-  TRANSCRIPT_WORK: R2Bucket;
   FINALIZE_WORKFLOW: Workflow<FinalizeWorkflowParams>;
 
   // Worker secrets
