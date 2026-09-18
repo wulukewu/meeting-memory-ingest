@@ -1,5 +1,5 @@
 name: Runtime status check
-# v1.4 follow-up final
+# final verification at 11:00 TPE
 
 on:
   push:
