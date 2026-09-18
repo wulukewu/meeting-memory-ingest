@@ -1,4 +1,4 @@
-name: Combine-only recovery
+name: Post-combine snapshot
 
 on:
   push:
@@ -15,19 +15,6 @@ jobs:
       WORKER_ADMIN_TOKEN: ${{ secrets.WORKER_ADMIN_TOKEN }}
       BASE_URL: https://meeting-memory-ingest.ai-memory.workers.dev
     steps:
-      - name: Restart from completed summary checkpoints
-        shell: bash
-        run: |
-          set -euo pipefail
-          for VIDEO_ID in GIVD1Am8zkY -oyv8ampS-0 b3jV7HzuR9c fjLxk0sKD5c; do
-            echo "Recovering ${VIDEO_ID}"
-            curl -fsS --max-time 60 \
-              -X POST \
-              -H "Authorization: Bearer ${WORKER_ADMIN_TOKEN}" \
-              "${BASE_URL}/admin/recover-finalization/${VIDEO_ID}"
-            echo
-          done
-
       - name: Snapshot
         shell: bash
         run: |
