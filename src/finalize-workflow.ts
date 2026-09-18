@@ -1,11 +1,6 @@
 import { WorkflowEntrypoint, WorkflowStep } from "cloudflare:workers";
 import type { WorkflowEvent } from "cloudflare:workers";
-import type {
-  Env,
-  FinalizeWorkflowParams,
-  MeetingSummary,
-  TranscriptResult,
-} from "./types";
+import type { Env, FinalizeWorkflowParams, MeetingSummary } from "./types";
 import type { PartialSummary } from "./groq";
 import { mergeTranscriptChunks } from "./chunks";
 import {
@@ -17,7 +12,7 @@ import {
 import { publishFinalMarkdown } from "./github";
 import { buildTranscriptPath, renderMeetingMarkdown } from "./markdown";
 import { completeVideo, failVideoById, getManifestEntry } from "./state";
-import { cleanupVideoWork, getStoredChunk, mergedObjectKey, putMergedTranscript, readJsonObject } from "./work-store";
+import { cleanupVideoWork, getStoredChunks, getSummaryInput, putSummaryInputs } from "./work-store";
 import { getVideo, getYouTubeAccessToken } from "./youtube";
 import { parseBoolean } from "./util";
 
@@ -31,10 +26,6 @@ const PUBLISH_STEP_OPTIONS = {
   timeout: "5 minutes" as const,
 } as const;
 
-function summaryInputKey(videoId: string, index: number): string {
-  return `work/${videoId}/summary-input-${String(index).padStart(4, "0")}.txt`;
-}
-
 export class FinalizeMeetingWorkflow extends WorkflowEntrypoint<Env, FinalizeWorkflowParams> {
   async run(event: WorkflowEvent<FinalizeWorkflowParams>, step: WorkflowStep) {
     const videoId = event.payload.videoId;
@@ -46,28 +37,14 @@ export class FinalizeMeetingWorkflow extends WorkflowEntrypoint<Env, FinalizeWor
         if (entry.status === "completed" && entry.path) return { alreadyCompleted: true, path: entry.path, summaryParts: 0 };
 
         const totalChunks = entry.totalChunks || 1;
-        const chunks = [];
-        for (let index = 0; index < totalChunks; index += 1) {
-          const chunk = await getStoredChunk(this.env, videoId, index);
-          if (!chunk) throw new Error(`transcript chunk ${index}/${totalChunks} is missing for ${videoId}`);
-          chunks.push(chunk);
-        }
-
+        const chunks = await getStoredChunks(this.env, videoId, totalChunks);
         const transcript = mergeTranscriptChunks(chunks, entry.durationSeconds);
-        await putMergedTranscript(this.env, videoId, transcript);
 
         let summaryParts = 0;
         if (parseBoolean(this.env.SUMMARY_ENABLED, true)) {
           const inputs = summaryInputChunks(transcript);
           summaryParts = inputs.length;
-          await Promise.all(
-            inputs.map((input, index) =>
-              this.env.TRANSCRIPT_WORK.put(summaryInputKey(videoId, index), input, {
-                httpMetadata: { contentType: "text/plain; charset=utf-8" },
-                customMetadata: { videoId, kind: "summary-input", index: String(index) },
-              }),
-            ),
-          );
+          await putSummaryInputs(this.env, videoId, inputs);
         }
 
         return { alreadyCompleted: false, path: "", summaryParts };
@@ -87,12 +64,10 @@ export class FinalizeMeetingWorkflow extends WorkflowEntrypoint<Env, FinalizeWor
             `summarize transcript part ${index + 1}`,
             SUMMARY_STEP_OPTIONS,
             async () => {
-              const object = await this.env.TRANSCRIPT_WORK.get(summaryInputKey(videoId, index));
-              if (!object) throw new Error(`missing summary input ${index} for ${videoId}`);
               return summarizeTranscriptChunk(
                 this.env,
                 video,
-                await object.text(),
+                await getSummaryInput(this.env, videoId, index),
                 index,
                 prepared.summaryParts,
               );
@@ -109,7 +84,12 @@ export class FinalizeMeetingWorkflow extends WorkflowEntrypoint<Env, FinalizeWor
         : fallbackMeetingSummary(video);
 
       const path = await step.do("publish durable meeting markdown", PUBLISH_STEP_OPTIONS, async () => {
-        const transcript = await readJsonObject<TranscriptResult>(this.env, mergedObjectKey(videoId));
+        const entry = await getManifestEntry(this.env, videoId);
+        if (!entry) throw new Error(`missing D1 state for ${videoId}`);
+        const transcript = mergeTranscriptChunks(
+          await getStoredChunks(this.env, videoId, entry.totalChunks || 1),
+          entry.durationSeconds,
+        );
         const outputPath = buildTranscriptPath(this.env, video, summary);
         const markdown = renderMeetingMarkdown(this.env, video, transcript, summary);
         await publishFinalMarkdown(this.env, outputPath, markdown, videoId);
@@ -120,11 +100,11 @@ export class FinalizeMeetingWorkflow extends WorkflowEntrypoint<Env, FinalizeWor
         await completeVideo(this.env, video, path);
       });
 
-      await step.do("cleanup temporary R2 work", PUBLISH_STEP_OPTIONS, async () => {
+      await step.do("cleanup temporary D1 work", PUBLISH_STEP_OPTIONS, async () => {
         try {
           await cleanupVideoWork(this.env, videoId);
         } catch (error) {
-          console.error("Meeting is completed but temporary R2 cleanup failed", videoId, error);
+          console.error("Meeting is completed but temporary D1 cleanup failed", videoId, error);
         }
       });
 
