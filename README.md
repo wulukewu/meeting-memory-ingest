@@ -1,6 +1,6 @@
 # meeting-memory-ingest
 
-把一個 **Private YouTube playlist** 當成 AI Memory Inbox。平常影片保持 `Private`；要處理時手動切成 `Unlisted`。Cloudflare Worker 定期掃描 playlist，只有真正需要 ingest 的影片才 dispatch GitHub Actions。Action 透過 WireGuard 下載 YouTube 音訊並切段，Groq 負責轉錄；Cloudflare D1 / R2 / Workflows 保存處理狀態並完成耐久化摘要，最後只把完成的 Markdown 寫進 `wulukewu/ai-memory`。
+把一個 **Private YouTube playlist** 當成 AI Memory Inbox。平常影片保持 `Private`；要處理時手動切成 `Unlisted`。Cloudflare Worker 定期掃描 playlist，只有真正需要 ingest 的影片才 dispatch GitHub Actions。Action 透過 WireGuard 下載 YouTube 音訊並切段，Groq 負責轉錄；Cloudflare D1 / Workflows 保存處理狀態並完成耐久化摘要，最後只把完成的 Markdown 寫進 `wulukewu/ai-memory`。
 
 ## 日常操作
 
@@ -48,7 +48,7 @@ GitHub Actions resolver
 Worker /resolver/transcribe
         │
         ├─ stream chunk to Groq Whisper
-        ├─ transcript JSON → R2
+        ├─ transcript JSON → D1
         └─ progress → D1
                 │
           all chunks complete
@@ -79,7 +79,7 @@ Dashboard states include:
 
 - **已完成**：final Markdown exists; video can be made Private / removed from playlist.
 - **轉錄中**：resolver is producing remaining chunks.
-- **整理摘要中**：all chunks are safe in R2 and the Cloudflare Workflow is finalizing.
+- **整理摘要中**：all chunks are safe in D1 and the Cloudflare Workflow is finalizing.
 - **等待 Groq 額度**：retry-after is stored in D1.
 - **YouTube 冷卻中**：resolver egress hit a bot-verification block.
 - **失敗**：cooldown then automatic retry; error details remain in D1.
@@ -92,9 +92,7 @@ Dashboard states include:
 
 ```jsonc
 {
-  "d1_databases": [{ "binding": "QUEUE_DB" }],
-  "r2_buckets": [{ "binding": "TRANSCRIPT_WORK" }],
-  "workflows": [
+  "d1_databases": [{ "binding": "QUEUE_DB" }],  "workflows": [
     {
       "name": "meeting-memory-finalize",
       "binding": "FINALIZE_WORKFLOW",
@@ -104,7 +102,7 @@ Dashboard states include:
 }
 ```
 
-Wrangler 4.45+ can automatically provision D1 and R2 resources when the binding is declared without account-specific IDs. The repository therefore does not contain a D1 database UUID or R2 bucket name.
+Production uses one explicit D1 binding. R2 is intentionally not used so this independent Cloudflare account does not need an R2 subscription or payment method. The D1 database ID is a non-secret resource identifier and can be committed in `wrangler.jsonc`.
 
 The Worker also bootstraps the v1 D1 tables with `CREATE TABLE IF NOT EXISTS`; `migrations/0001_runtime_state.sql` is kept as the canonical schema for inspection and future migrations.
 
@@ -146,7 +144,7 @@ The new Worker performs a **one-shot migration automatically before the first cr
 
 1. Read the old manifest.
 2. Insert job state into D1.
-3. Recover already-completed transcript chunks into R2, including legacy work files larger than 1 MiB via the Git blob API.
+3. Recover already-completed transcript chunks into D1, including legacy work files larger than 1 MiB via the Git blob API.
 4. Mark the migration in D1 `runtime_meta` so it cannot overwrite newer runtime state on later runs.
 5. Convert legacy in-flight `processing` jobs into immediately resumable state.
 
@@ -158,7 +156,7 @@ curl -X POST \
   https://meeting-memory-ingest.ai-memory.workers.dev/admin/migrate-legacy-state
 ```
 
-Do **not** delete the old `_manifest.json` / `_work` files until the first migration has been verified. After D1/R2 has the state and active jobs resume successfully, those legacy files can be removed from the current tree. Rewriting old Git history is a separate, deliberate operation.
+Do **not** delete the old `_manifest.json` / `_work` files until the first migration has been verified. After D1 has the state and active jobs resume successfully, those legacy files can be removed from the current tree. Rewriting old Git history is a separate, deliberate operation.
 
 ## Resolver behavior
 
@@ -174,7 +172,7 @@ transcript chunk: 2700 seconds (45 min)
 preprocessing: 16 kHz mono Opus 24 kbps
 ```
 
-Each resolver run downloads the source once and starts uploading from the first unfinished chunk recorded in D1. Already completed chunks are read from R2 and are not sent to Whisper again.
+Each resolver run downloads the source once and starts uploading from the first unfinished chunk recorded in D1. Already completed chunks are read from D1 and are not sent to Whisper again.
 
 After the last transcript chunk is stored, `/resolver/transcribe` returns `finalizing`; the GitHub Action exits successfully while Cloudflare Workflow continues independently.
 
@@ -268,9 +266,16 @@ All non-dashboard administrative/runtime endpoints require the existing bearer `
 
 - YouTube OAuth is readonly.
 - OAuth access tokens are used inside a Workflow step but are **not returned as durable step output**.
-- D1 contains operational metadata; R2 contains temporary transcript working data.
-- R2 work is deleted after successful durable publish.
+- D1 contains operational metadata; D1 contains both operational metadata and temporary transcript working data.
+- Temporary D1 transcript/summary rows are deleted after successful durable publish.
 - Signed YouTube media URLs are never stored.
 - `GITHUB_TOKEN` and `RESOLVER_GITHUB_TOKEN` remain separate.
 - Automatic Git commits use the unlinked identity `wulukewu <luke@ai-memory.local>`.
 - AI summaries are reference material and do not automatically modify `core.md`.
+
+
+## Why D1-only
+
+This Worker intentionally avoids R2. On the Workers Free plan, D1 supports a 500 MB database, 5 GB total account storage, 5 million rows read/day, 100,000 rows written/day, and up to 2,000,000 bytes per TEXT/BLOB/row. Each 45-minute transcript chunk is stored independently and rejected before 1.9 MB, so one long meeting never becomes one giant database row.
+
+The completed meeting transcript is not kept as duplicate runtime storage. It is reconstructed from D1 chunks during finalization, published to ai-memory, and then its temporary D1 rows are deleted.
