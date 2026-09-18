@@ -9,12 +9,12 @@
   },
   "d1_databases": [
     {
-      "binding": "STATE_DB"
+      "binding": "QUEUE_DB"
     }
   ],
   "r2_buckets": [
     {
-      "binding": "WORK_BUCKET"
+      "binding": "TRANSCRIPT_WORK"
     }
   ],
   "workflows": [
