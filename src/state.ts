@@ -293,10 +293,6 @@ export async function recordChunkCompleted(
   if (chunkIndex < 0 || chunkIndex >= totalChunks) throw new Error(`invalid chunk index ${chunkIndex}/${totalChunks}`);
 
   const nowIso = new Date().toISOString();
-  await env.QUEUE_DB.prepare(
-    "INSERT OR REPLACE INTO chunks (video_id,chunk_index,r2_key,completed_at) VALUES (?,?,?,?)",
-  ).bind(videoId, chunkIndex, r2Key, nowIso).run();
-
   const completedChunks = normalizedCompletedChunks(totalChunks, [...(existing.completedChunks || []), chunkIndex]);
   const nextChunkIndex = nextPendingChunk(totalChunks, completedChunks);
   await env.QUEUE_DB.prepare(
