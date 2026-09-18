@@ -132,34 +132,9 @@ RESOLVER_GITHUB_TOKEN
 
 `GITHUB_TOKEN` is still needed, but after migration its normal runtime role is only publishing the final meeting Markdown to `ai-memory`.
 
-## One-time migration from legacy ai-memory state
+## Legacy migration status
 
-Older versions used:
-
-```text
-reference/meeting-transcripts/_manifest.json
-reference/meeting-transcripts/_work/<videoId>.json
-```
-
-as the queue database. That caused excessive commits and eventually hit the GitHub Contents API inline-content limit when a work JSON exceeded 1 MiB.
-
-The new Worker performs a **one-shot migration automatically before the first cron/manual processing run**:
-
-1. Read the old manifest.
-2. Insert job state into D1.
-3. Recover already-completed transcript chunks into D1, including legacy work files larger than 1 MiB via the Git blob API.
-4. Mark the migration in D1 `runtime_meta` so it cannot overwrite newer runtime state on later runs.
-5. Convert legacy in-flight `processing` jobs into immediately resumable state.
-
-For diagnostics, the same migration can be invoked manually by an authenticated admin:
-
-```bash
-curl -X POST \
-  -H "Authorization: Bearer $ADMIN_TOKEN" \
-  https://meeting-memory-ingest.ai-memory.workers.dev/admin/migrate-legacy-state
-```
-
-Do **not** delete the old `_manifest.json` / `_work` files until the first migration has been verified. After D1 has the state and active jobs resume successfully, those legacy files can be removed from the current tree. Rewriting old Git history is a separate, deliberate operation.
+The Git-backed runtime state migration is complete. Runtime state now lives exclusively in D1; `ai-memory` stores only durable meeting Markdown. Legacy `_manifest.json` / `_work/**` files have been removed from the current tree, and the one-time migration endpoint/code has been retired.
 
 ## Resolver behavior
 
@@ -260,7 +235,6 @@ POST /process/<videoId>
 POST /retry/<videoId>
 POST /resolver/transcribe
 POST /resolver/callback
-POST /admin/migrate-legacy-state
 ```
 
 All non-dashboard administrative/runtime endpoints require the existing bearer `ADMIN_TOKEN`.
