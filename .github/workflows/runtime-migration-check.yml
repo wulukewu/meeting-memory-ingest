@@ -1,4 +1,4 @@
-name: Finalization snapshot
+name: Combine-only recovery
 
 on:
   push:
@@ -8,18 +8,32 @@ permissions:
   contents: read
 
 jobs:
-  snapshot:
+  recover:
     runs-on: ubuntu-latest
-    timeout-minutes: 4
+    timeout-minutes: 6
     env:
       WORKER_ADMIN_TOKEN: ${{ secrets.WORKER_ADMIN_TOKEN }}
       BASE_URL: https://meeting-memory-ingest.ai-memory.workers.dev
     steps:
+      - name: Restart from completed summary checkpoints
+        shell: bash
+        run: |
+          set -euo pipefail
+          for VIDEO_ID in GIVD1Am8zkY -oyv8ampS-0 b3jV7HzuR9c fjLxk0sKD5c; do
+            echo "Recovering ${VIDEO_ID}"
+            curl -fsS --max-time 60 \
+              -X POST \
+              -H "Authorization: Bearer ${WORKER_ADMIN_TOKEN}" \
+              "${BASE_URL}/admin/recover-finalization/${VIDEO_ID}"
+            echo
+          done
+
       - name: Snapshot
         shell: bash
         run: |
           set -euo pipefail
+          sleep 15
           curl -fsS --max-time 60 \
             -H "Authorization: Bearer ${WORKER_ADMIN_TOKEN}" \
             "${BASE_URL}/status" \
-            | jq '{watched:[.recent[]|select(.videoId=="GIVD1Am8zkY" or .videoId=="-oyv8ampS-0" or .videoId=="b3jV7HzuR9c" or .videoId=="5q7XRw5N9jI" or .videoId=="fjLxk0sKD5c")|{videoId,status,completedAt,path,lastError,finalizationProgress,workflowStatus}]}'
+            | jq '{watched:[.recent[]|select(.videoId=="GIVD1Am8zkY" or .videoId=="-oyv8ampS-0" or .videoId=="b3jV7HzuR9c" or .videoId=="fjLxk0sKD5c")|{videoId,status,completedAt,path,lastError,finalizationProgress,workflowStatus}]}'
