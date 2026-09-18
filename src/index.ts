@@ -15,7 +15,7 @@ import { getFinalizationProgress } from "./work-store";
 
 export { FinalizeMeetingWorkflow } from "./finalize-workflow";
 
-const PIPELINE_VERSION = "d1-workers-ai-v1.1+dashboard-v1.1+favicon-v1";
+const PIPELINE_VERSION = "d1-workers-ai-v1.2+dashboard-v1.1+favicon-v1";
 
 function isAdmin(request: Request, env: Env): boolean {
   const auth = request.headers.get("authorization");
@@ -122,6 +122,7 @@ async function handleFetch(request: Request, env: Env, ctx: WaitUntilContext): P
       temperature: 0,
       max_completion_tokens: 80,
       response_format: { type: "json_object" },
+      chat_template_kwargs: { enable_thinking: false },
     });
     return jsonResponse({
       ok: true,
