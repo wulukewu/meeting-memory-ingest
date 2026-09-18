@@ -15,7 +15,7 @@ import { getFinalizationProgress } from "./work-store";
 
 export { FinalizeMeetingWorkflow } from "./finalize-workflow";
 
-const PIPELINE_VERSION = "d1-workers-ai-v1+dashboard-v1.1+favicon-v1";
+const PIPELINE_VERSION = "d1-workers-ai-v1.1+dashboard-v1.1+favicon-v1";
 
 function isAdmin(request: Request, env: Env): boolean {
   const auth = request.headers.get("authorization");
@@ -107,6 +107,28 @@ async function handleFetch(request: Request, env: Env, ctx: WaitUntilContext): P
 
   if (request.method === "POST" && url.pathname === "/admin/migrate-legacy-state") {
     return jsonResponse(await migrateLegacyAiMemoryState(env));
+  }
+
+  if (request.method === "POST" && url.pathname === "/admin/workers-ai-smoke") {
+    const model = env.SUMMARY_MODEL || "@cf/zai-org/glm-4.7-flash";
+    const startedAt = Date.now();
+    const result = await env.AI.run(model, {
+      messages: [
+        {
+          role: "user",
+          content: '只輸出有效 JSON：{"ok":true,"provider":"workers-ai"}',
+        },
+      ],
+      temperature: 0,
+      max_completion_tokens: 80,
+      response_format: { type: "json_object" },
+    });
+    return jsonResponse({
+      ok: true,
+      model,
+      elapsedMs: Date.now() - startedAt,
+      result,
+    });
   }
 
   if (request.method === "POST" && url.pathname.startsWith("/admin/recover-finalization/")) {
