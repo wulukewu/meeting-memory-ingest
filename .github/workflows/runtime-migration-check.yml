@@ -1,4 +1,4 @@
-name: Resume final legacy backlog item
+name: Diagnose final legacy backlog item
 
 on:
   push:
@@ -8,26 +8,42 @@ permissions:
   contents: read
 
 jobs:
-  resume:
+  diagnose:
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 8
     env:
       WORKER_ADMIN_TOKEN: ${{ secrets.WORKER_ADMIN_TOKEN }}
       BASE_URL: https://meeting-memory-ingest.ai-memory.workers.dev
     steps:
-      - name: Resume Pt4
-        shell: bash
-        run: |
-          set -euo pipefail
-          curl -fsS --max-time 90 -X POST \
-            -H "Authorization: Bearer ${WORKER_ADMIN_TOKEN}" \
-            "${BASE_URL}/retry/Pt4YfpZWUbI?wait=1"
-          echo
-      - name: Snapshot
+      - name: Read Pt4 status
         shell: bash
         run: |
           set -euo pipefail
           curl -fsS --max-time 60 \
             -H "Authorization: Bearer ${WORKER_ADMIN_TOKEN}" \
             "${BASE_URL}/status" \
-            | jq '{pt4:[.recent[]|select(.videoId=="Pt4YfpZWUbI")|{videoId,status,attempts,retryAfterAt,lastError,completedChunks,totalChunks,nextChunkIndex}]}'
+            | jq '{pipelineVersion,pt4:[.recent[]|select(.videoId=="Pt4YfpZWUbI")|{videoId,status,attempts,completedAt,failedAt,retryAfterAt,path,lastError,totalChunks,nextChunkIndex,completedChunks,finalizationId,finalizationProgress,workflowStatus}]}'
+
+      - name: Retry Pt4 and preserve response
+        shell: bash
+        run: |
+          set -euo pipefail
+          CODE="$(curl -sS --max-time 120 \
+            -o /tmp/pt4.json \
+            -w '%{http_code}' \
+            -X POST \
+            -H "Authorization: Bearer ${WORKER_ADMIN_TOKEN}" \
+            "${BASE_URL}/retry/Pt4YfpZWUbI?wait=1")"
+          cat /tmp/pt4.json
+          echo
+          echo "HTTP ${CODE}"
+          exit 0
+
+      - name: Read Pt4 status after retry
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl -fsS --max-time 60 \
+            -H "Authorization: Bearer ${WORKER_ADMIN_TOKEN}" \
+            "${BASE_URL}/status" \
+            | jq '{pt4:[.recent[]|select(.videoId=="Pt4YfpZWUbI")|{videoId,status,attempts,completedAt,failedAt,retryAfterAt,path,lastError,totalChunks,nextChunkIndex,completedChunks,finalizationId,finalizationProgress,workflowStatus}]}'
