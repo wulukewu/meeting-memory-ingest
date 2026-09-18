@@ -9,7 +9,7 @@ export function mergedObjectKey(videoId: string): string {
 }
 
 export async function getStoredChunk(env: Env, videoId: string, chunkIndex: number): Promise<StoredTranscriptChunk | null> {
-  const object = await env.WORK_BUCKET.get(chunkObjectKey(videoId, chunkIndex));
+  const object = await env.TRANSCRIPT_WORK.get(chunkObjectKey(videoId, chunkIndex));
   if (!object) return null;
   const parsed = JSON.parse(await object.text()) as StoredTranscriptChunk;
   if (parsed.version !== 1 || parsed.videoId !== videoId || parsed.chunkIndex !== chunkIndex) {
@@ -20,7 +20,7 @@ export async function getStoredChunk(env: Env, videoId: string, chunkIndex: numb
 
 export async function putStoredChunk(env: Env, chunk: StoredTranscriptChunk): Promise<string> {
   const key = chunkObjectKey(chunk.videoId, chunk.chunkIndex);
-  await env.WORK_BUCKET.put(key, JSON.stringify(chunk), {
+  await env.TRANSCRIPT_WORK.put(key, JSON.stringify(chunk), {
     httpMetadata: { contentType: "application/json; charset=utf-8" },
     customMetadata: {
       videoId: chunk.videoId,
@@ -32,7 +32,7 @@ export async function putStoredChunk(env: Env, chunk: StoredTranscriptChunk): Pr
 
 export async function putMergedTranscript(env: Env, videoId: string, value: unknown): Promise<string> {
   const key = mergedObjectKey(videoId);
-  await env.WORK_BUCKET.put(key, JSON.stringify(value), {
+  await env.TRANSCRIPT_WORK.put(key, JSON.stringify(value), {
     httpMetadata: { contentType: "application/json; charset=utf-8" },
     customMetadata: { videoId, kind: "merged-transcript" },
   });
@@ -40,7 +40,7 @@ export async function putMergedTranscript(env: Env, videoId: string, value: unkn
 }
 
 export async function readJsonObject<T>(env: Env, key: string): Promise<T> {
-  const object = await env.WORK_BUCKET.get(key);
+  const object = await env.TRANSCRIPT_WORK.get(key);
   if (!object) throw new Error(`R2 object ${key} is missing`);
   return JSON.parse(await object.text()) as T;
 }
@@ -48,8 +48,8 @@ export async function readJsonObject<T>(env: Env, key: string): Promise<T> {
 export async function cleanupVideoWork(env: Env, videoId: string): Promise<void> {
   let cursor: string | undefined;
   do {
-    const listed = await env.WORK_BUCKET.list({ prefix: `work/${videoId}/`, cursor });
-    if (listed.objects.length) await env.WORK_BUCKET.delete(listed.objects.map((object) => object.key));
+    const listed = await env.TRANSCRIPT_WORK.list({ prefix: `work/${videoId}/`, cursor });
+    if (listed.objects.length) await env.TRANSCRIPT_WORK.delete(listed.objects.map((object) => object.key));
     cursor = listed.truncated ? listed.cursor : undefined;
   } while (cursor);
 }

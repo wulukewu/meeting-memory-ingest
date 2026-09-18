@@ -62,7 +62,7 @@ export class FinalizeMeetingWorkflow extends WorkflowEntrypoint<Env, FinalizeWor
           summaryParts = inputs.length;
           await Promise.all(
             inputs.map((input, index) =>
-              this.env.WORK_BUCKET.put(summaryInputKey(videoId, index), input, {
+              this.env.TRANSCRIPT_WORK.put(summaryInputKey(videoId, index), input, {
                 httpMetadata: { contentType: "text/plain; charset=utf-8" },
                 customMetadata: { videoId, kind: "summary-input", index: String(index) },
               }),
@@ -87,7 +87,7 @@ export class FinalizeMeetingWorkflow extends WorkflowEntrypoint<Env, FinalizeWor
             `summarize transcript part ${index + 1}`,
             SUMMARY_STEP_OPTIONS,
             async () => {
-              const object = await this.env.WORK_BUCKET.get(summaryInputKey(videoId, index));
+              const object = await this.env.TRANSCRIPT_WORK.get(summaryInputKey(videoId, index));
               if (!object) throw new Error(`missing summary input ${index} for ${videoId}`);
               return summarizeTranscriptChunk(
                 this.env,

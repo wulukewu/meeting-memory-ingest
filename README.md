@@ -17,8 +17,8 @@
 
 這個 repo 刻意把「運行狀態」和「長期記憶」分開：
 
-- **D1 / `STATE_DB`**：影片 status、attempts、lease、retry time、chunk progress、final path。
-- **R2 / `WORK_BUCKET`**：暫時的 Whisper chunk JSON、merged transcript、summary inputs。
+- **D1 / `QUEUE_DB`**：影片 status、attempts、lease、retry time、chunk progress、final path。
+- **R2 / `TRANSCRIPT_WORK`**：暫時的 Whisper chunk JSON、merged transcript、summary inputs。
 - **Cloudflare Workflows / `FINALIZE_WORKFLOW`**：可恢復的多步摘要與 final publish。
 - **GitHub `ai-memory`**：只保存完成後值得長期查閱的 meeting Markdown。
 
@@ -92,8 +92,8 @@ Dashboard states include:
 
 ```jsonc
 {
-  "d1_databases": [{ "binding": "STATE_DB" }],
-  "r2_buckets": [{ "binding": "WORK_BUCKET" }],
+  "d1_databases": [{ "binding": "QUEUE_DB" }],
+  "r2_buckets": [{ "binding": "TRANSCRIPT_WORK" }],
   "workflows": [
     {
       "name": "meeting-memory-finalize",

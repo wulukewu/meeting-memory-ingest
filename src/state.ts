@@ -48,7 +48,7 @@ let schemaReady: Promise<void> | undefined;
 
 export async function ensureStateSchema(env: Env): Promise<void> {
   if (!schemaReady) {
-    schemaReady = env.STATE_DB.exec(STATE_SCHEMA_SQL)
+    schemaReady = env.QUEUE_DB.exec(STATE_SCHEMA_SQL)
       .then(() => undefined)
       .catch((error) => {
         schemaReady = undefined;
@@ -114,7 +114,7 @@ function rowToEntry(row: VideoRow, completedChunks: number[] = []): ManifestEntr
 
 async function chunkIndexes(env: Env, videoId: string): Promise<number[]> {
   await ensureStateSchema(env);
-  const result = await env.STATE_DB.prepare(
+  const result = await env.QUEUE_DB.prepare(
     "SELECT chunk_index FROM chunks WHERE video_id = ? ORDER BY chunk_index",
   ).bind(videoId).all<{ chunk_index: number }>();
   return result.results.map((row) => row.chunk_index);
@@ -122,7 +122,7 @@ async function chunkIndexes(env: Env, videoId: string): Promise<number[]> {
 
 export async function getManifestEntry(env: Env, videoId: string): Promise<ManifestEntry | undefined> {
   await ensureStateSchema(env);
-  const row = await env.STATE_DB.prepare("SELECT * FROM videos WHERE video_id = ?")
+  const row = await env.QUEUE_DB.prepare("SELECT * FROM videos WHERE video_id = ?")
     .bind(videoId)
     .first<VideoRow>();
   if (!row) return undefined;
@@ -132,8 +132,8 @@ export async function getManifestEntry(env: Env, videoId: string): Promise<Manif
 export async function loadManifest(env: Env): Promise<{ manifest: Manifest }> {
   await ensureStateSchema(env);
   const [videoResult, chunkResult] = await Promise.all([
-    env.STATE_DB.prepare("SELECT * FROM videos ORDER BY updated_at DESC").all<VideoRow>(),
-    env.STATE_DB.prepare("SELECT video_id, chunk_index, r2_key, completed_at FROM chunks ORDER BY video_id, chunk_index")
+    env.QUEUE_DB.prepare("SELECT * FROM videos ORDER BY updated_at DESC").all<VideoRow>(),
+    env.QUEUE_DB.prepare("SELECT video_id, chunk_index, r2_key, completed_at FROM chunks ORDER BY video_id, chunk_index")
       .all<ChunkRow>(),
   ]);
   const byVideo = new Map<string, number[]>();
@@ -164,7 +164,7 @@ export function youtubeResolverCooldownUntil(manifest: Manifest, now = Date.now(
 
 async function insertNewClaim(env: Env, video: VideoRecord, entry: ManifestEntry, nowIso: string): Promise<boolean> {
   await ensureStateSchema(env);
-  const result = await env.STATE_DB.prepare(
+  const result = await env.QUEUE_DB.prepare(
     `INSERT OR IGNORE INTO videos (
       video_id,title,youtube_url,status,attempts,started_at,transcription_model,summary_model,
       duration_seconds,chunk_seconds,total_chunks,next_chunk_index,updated_at
@@ -245,7 +245,7 @@ export async function claimVideo(env: Env, video: VideoRecord): Promise<ClaimRes
     return { claimed: false, reason: "failure retry cooldown is still active" };
   }
 
-  const result = await env.STATE_DB.prepare(
+  const result = await env.QUEUE_DB.prepare(
     `UPDATE videos SET
       title=?, youtube_url=?, status='processing', attempts=?, started_at=?,
       completed_at=NULL, failed_at=NULL, retry_after_at=NULL, path=path, last_error=NULL,
@@ -284,13 +284,13 @@ export async function recordChunkCompleted(
   if (chunkIndex < 0 || chunkIndex >= totalChunks) throw new Error(`invalid chunk index ${chunkIndex}/${totalChunks}`);
 
   const nowIso = new Date().toISOString();
-  await env.STATE_DB.prepare(
+  await env.QUEUE_DB.prepare(
     "INSERT OR REPLACE INTO chunks (video_id,chunk_index,r2_key,completed_at) VALUES (?,?,?,?)",
   ).bind(videoId, chunkIndex, r2Key, nowIso).run();
 
   const completedChunks = normalizedCompletedChunks(totalChunks, [...(existing.completedChunks || []), chunkIndex]);
   const nextChunkIndex = nextPendingChunk(totalChunks, completedChunks);
-  await env.STATE_DB.prepare(
+  await env.QUEUE_DB.prepare(
     "UPDATE videos SET next_chunk_index=?, updated_at=? WHERE video_id=?",
   ).bind(nextChunkIndex, nowIso, videoId).run();
 
@@ -301,7 +301,7 @@ export async function deferVideo(env: Env, video: VideoRecord, retryAfterSeconds
   const existing = await getManifestEntry(env, video.id);
   const nowIso = new Date().toISOString();
   const retryAt = new Date(Date.now() + Math.max(1, Math.ceil(retryAfterSeconds)) * 1000).toISOString();
-  await env.STATE_DB.prepare(
+  await env.QUEUE_DB.prepare(
     `UPDATE videos SET status='waiting', retry_after_at=?, last_error=?, failed_at=NULL,
        title=?, youtube_url=?, updated_at=? WHERE video_id=?`,
   ).bind(
@@ -319,7 +319,7 @@ export async function makeRetryableNow(env: Env, videoId: string): Promise<boole
   const existing = await getManifestEntry(env, videoId);
   if (!existing || (existing.status !== "failed" && existing.status !== "waiting")) return false;
   const nowIso = new Date().toISOString();
-  await env.STATE_DB.prepare(
+  await env.QUEUE_DB.prepare(
     "UPDATE videos SET failed_at=?, retry_after_at=?, updated_at=? WHERE video_id=?",
   ).bind(new Date(0).toISOString(), new Date(0).toISOString(), nowIso, videoId).run();
   return true;
@@ -329,7 +329,7 @@ export async function markFinalizing(env: Env, videoId: string, workflowId: stri
   const existing = await getManifestEntry(env, videoId);
   if (!existing) throw new Error(`video ${videoId} has no D1 state`);
   const nowIso = new Date().toISOString();
-  await env.STATE_DB.prepare(
+  await env.QUEUE_DB.prepare(
     `UPDATE videos SET status='finalizing', finalization_id=?, failed_at=NULL,
        retry_after_at=NULL, last_error=NULL, updated_at=? WHERE video_id=?`,
   ).bind(workflowId, nowIso, videoId).run();
@@ -339,7 +339,7 @@ export async function markFinalizing(env: Env, videoId: string, workflowId: stri
 export async function completeVideo(env: Env, video: VideoRecord, path: string): Promise<void> {
   await ensureStateSchema(env);
   const nowIso = new Date().toISOString();
-  await env.STATE_DB.prepare(
+  await env.QUEUE_DB.prepare(
     `UPDATE videos SET status='completed', path=?, completed_at=?, failed_at=NULL,
        retry_after_at=NULL, last_error=NULL, finalization_id=NULL,
        title=?, youtube_url=?, transcription_model=?, summary_model=?, updated_at=?
@@ -360,7 +360,7 @@ export async function failVideo(env: Env, video: VideoRecord, error: unknown): P
   await ensureStateSchema(env);
   const nowIso = new Date().toISOString();
   try {
-    await env.STATE_DB.prepare(
+    await env.QUEUE_DB.prepare(
       `UPDATE videos SET status='failed', failed_at=?, retry_after_at=NULL,
          last_error=?, finalization_id=NULL, title=?, youtube_url=?, updated_at=?
        WHERE video_id=? AND status != 'completed'`,
@@ -380,7 +380,7 @@ export async function failVideo(env: Env, video: VideoRecord, error: unknown): P
 export async function failVideoById(env: Env, videoId: string, error: unknown): Promise<void> {
   await ensureStateSchema(env);
   const nowIso = new Date().toISOString();
-  await env.STATE_DB.prepare(
+  await env.QUEUE_DB.prepare(
     `UPDATE videos SET status='failed', failed_at=?, retry_after_at=NULL,
        last_error=?, finalization_id=NULL, updated_at=? WHERE video_id=? AND status != 'completed'`,
   ).bind(nowIso, truncate(errorMessage(error), 1200), nowIso, videoId).run();
@@ -389,8 +389,8 @@ export async function failVideoById(env: Env, videoId: string, error: unknown): 
 export async function resetVideo(env: Env, videoId: string): Promise<boolean> {
   const existing = await getManifestEntry(env, videoId);
   if (!existing) return false;
-  await env.STATE_DB.prepare("DELETE FROM chunks WHERE video_id = ?").bind(videoId).run();
-  await env.STATE_DB.prepare("DELETE FROM videos WHERE video_id = ?").bind(videoId).run();
+  await env.QUEUE_DB.prepare("DELETE FROM chunks WHERE video_id = ?").bind(videoId).run();
+  await env.QUEUE_DB.prepare("DELETE FROM videos WHERE video_id = ?").bind(videoId).run();
   return true;
 }
 
@@ -403,7 +403,7 @@ export async function upsertLegacyEntry(env: Env, videoId: string, entry: Manife
   const migratedLastError = wasProcessing
     ? "Migrated from legacy ai-memory runtime state; ready to resume."
     : entry.lastError || null;
-  await env.STATE_DB.prepare(
+  await env.QUEUE_DB.prepare(
     `INSERT INTO videos (
       video_id,title,youtube_url,status,attempts,started_at,completed_at,failed_at,retry_after_at,
       path,last_error,transcription_model,summary_model,duration_seconds,chunk_seconds,total_chunks,
@@ -436,7 +436,7 @@ export async function upsertLegacyEntry(env: Env, videoId: string, entry: Manife
 
 export async function runtimeMeta(env: Env, key: string): Promise<string | undefined> {
   await ensureStateSchema(env);
-  const row = await env.STATE_DB.prepare("SELECT value FROM runtime_meta WHERE key = ?")
+  const row = await env.QUEUE_DB.prepare("SELECT value FROM runtime_meta WHERE key = ?")
     .bind(key)
     .first<{ value: string }>();
   return row?.value;
@@ -445,7 +445,7 @@ export async function runtimeMeta(env: Env, key: string): Promise<string | undef
 export async function setRuntimeMeta(env: Env, key: string, value: string): Promise<void> {
   await ensureStateSchema(env);
   const nowIso = new Date().toISOString();
-  await env.STATE_DB.prepare(
+  await env.QUEUE_DB.prepare(
     "INSERT INTO runtime_meta (key,value,updated_at) VALUES (?,?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at",
   ).bind(key, value, nowIso).run();
 }
