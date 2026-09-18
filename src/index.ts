@@ -8,7 +8,7 @@ import { jsonResponse } from "./util";
 
 export { FinalizeMeetingWorkflow } from "./finalize-workflow";
 
-const PIPELINE_VERSION = "d1-workflows-v1+dashboard-v1.1+favicon-v1";
+const PIPELINE_VERSION = "d1-workflows-v1.1+dashboard-v1.1+favicon-v1";
 
 function isAdmin(request: Request, env: Env): boolean {
   const auth = request.headers.get("authorization");
@@ -65,10 +65,29 @@ async function handleFetch(request: Request, env: Env, ctx: WaitUntilContext): P
 
   if (request.method === "GET" && url.pathname === "/status") {
     const { manifest } = await loadManifest(env);
-    const entries = Object.entries(manifest.videos)
+    const baseEntries = Object.entries(manifest.videos)
       .sort(([, a], [, b]) => Date.parse(b.completedAt || b.failedAt || b.startedAt || "1970-01-01") - Date.parse(a.completedAt || a.failedAt || a.startedAt || "1970-01-01"))
       .slice(0, 25)
       .map(([videoId, value]) => ({ videoId, ...value }));
+
+    const entries = await Promise.all(
+      baseEntries.map(async (entry) => {
+        if (!entry.finalizationId) return entry;
+        try {
+          const instance = await env.FINALIZE_WORKFLOW.get(entry.finalizationId);
+          return { ...entry, workflowStatus: await instance.status() };
+        } catch (error) {
+          return {
+            ...entry,
+            workflowStatus: {
+              status: "unknown",
+              error: { message: error instanceof Error ? error.message : String(error) },
+            },
+          };
+        }
+      }),
+    );
+
     return jsonResponse({ pipelineVersion: PIPELINE_VERSION, ...configStatus(env), manifestUpdatedAt: manifest.updatedAt, recent: entries });
   }
 
