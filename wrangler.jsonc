@@ -14,6 +14,9 @@
       "database_id": "ec0cf558-fce5-474c-835f-90bb4e344403"
     }
   ],
+  "ai": {
+    "binding": "AI"
+  },
   "workflows": [
     {
       "name": "meeting-memory-finalize",
@@ -43,7 +46,7 @@
     "AI_MEMORY_BRANCH": "main",
     "TRANSCRIPT_ROOT": "reference/meeting-transcripts",
     "GROQ_TRANSCRIPTION_MODEL": "whisper-large-v3",
-    "GROQ_SUMMARY_MODEL": "openai/gpt-oss-120b",
+    "SUMMARY_MODEL": "@cf/zai-org/glm-4.7-flash",
     "SUMMARY_ENABLED": "true",
     "MAX_ITEMS_PER_RUN": "1",
     "MAX_PLAYLIST_PAGES": "10",
