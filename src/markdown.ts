@@ -56,7 +56,7 @@ date: ${yamlString(isoDate(video.publishedAt))}
 privacy_at_ingest: ${yamlString(video.privacyStatus)}
 category: ${yamlString(safePathSegment(summary.category || "general"))}
 transcription_model: ${yamlString(env.GROQ_TRANSCRIPTION_MODEL)}
-summary_model: ${yamlString(env.SUMMARY_ENABLED === "true" ? env.GROQ_SUMMARY_MODEL : "disabled")}
+summary_model: ${yamlString(env.SUMMARY_ENABLED === "true" ? env.SUMMARY_MODEL : "disabled")}
 ${duration != null ? `duration_seconds: ${Math.round(duration)}\n` : ""}tags: [${tags.map(yamlString).join(", ")}]
 ---
 

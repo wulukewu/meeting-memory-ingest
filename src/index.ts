@@ -15,7 +15,7 @@ import { getFinalizationProgress } from "./work-store";
 
 export { FinalizeMeetingWorkflow } from "./finalize-workflow";
 
-const PIPELINE_VERSION = "d1-workflows-v1.5+dashboard-v1.1+favicon-v1";
+const PIPELINE_VERSION = "d1-workers-ai-v1+dashboard-v1.1+favicon-v1";
 
 function isAdmin(request: Request, env: Env): boolean {
   const auth = request.headers.get("authorization");
@@ -40,6 +40,7 @@ function configStatus(env: Env) {
   const missingBindings = [
     ...(env.QUEUE_DB ? [] : ["QUEUE_DB"]),
     ...(env.FINALIZE_WORKFLOW ? [] : ["FINALIZE_WORKFLOW"]),
+    ...(env.AI ? [] : ["AI"]),
   ];
   return {
     configured: missingSecrets.length === 0 && missingVars.length === 0 && missingBindings.length === 0,

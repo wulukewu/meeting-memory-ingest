@@ -7,6 +7,7 @@ export interface Env {
   // Cloudflare bindings
   QUEUE_DB: D1Database;
   FINALIZE_WORKFLOW: Workflow<FinalizeWorkflowParams>;
+  AI: Ai;
 
   // Worker secrets
   GROQ_API_KEY: string;
@@ -28,7 +29,7 @@ export interface Env {
   AI_MEMORY_BRANCH: string;
   TRANSCRIPT_ROOT: string;
   GROQ_TRANSCRIPTION_MODEL: string;
-  GROQ_SUMMARY_MODEL: string;
+  SUMMARY_MODEL: string;
   SUMMARY_ENABLED: string;
   MAX_ITEMS_PER_RUN: string;
   MAX_PLAYLIST_PAGES: string;
