@@ -1,33 +1,25 @@
-name: Workers AI smoke
+name: Runtime state snapshot
 
 on:
   push:
     branches: [ops/runtime-migration-check]
 
-# 14:08 verification
-
 permissions:
   contents: read
 
 jobs:
-  smoke:
+  status:
     runs-on: ubuntu-latest
-    timeout-minutes: 3
+    timeout-minutes: 5
     env:
       WORKER_ADMIN_TOKEN: ${{ secrets.WORKER_ADMIN_TOKEN }}
       BASE_URL: https://meeting-memory-ingest.ai-memory.workers.dev
     steps:
-      - name: Test Workers AI directly
+      - name: Read runtime state
         shell: bash
         run: |
           set -euo pipefail
-          HTTP_CODE="$(curl -sS --max-time 90 \
-            -o /tmp/ai.json \
-            -w '%{http_code}' \
-            -X POST \
+          curl -fsS --max-time 60 \
             -H "Authorization: Bearer ${WORKER_ADMIN_TOKEN}" \
-            "${BASE_URL}/admin/workers-ai-smoke")"
-          cat /tmp/ai.json
-          echo
-          echo "HTTP ${HTTP_CODE}"
-          [[ "${HTTP_CODE}" =~ ^2 ]]
+            "${BASE_URL}/status" \
+            | jq '{pipelineVersion,manifestUpdatedAt,recent:[.recent[]|{videoId,title,status,completedAt,retryAfterAt,path,lastError,completedChunks,totalChunks,nextChunkIndex,finalizationProgress,workflowStatus}]}'
