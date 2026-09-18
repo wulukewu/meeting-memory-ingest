@@ -43,6 +43,14 @@ const STATE_SCHEMA_STATEMENTS = [
     PRIMARY KEY (video_id, part_index),
     FOREIGN KEY (video_id) REFERENCES videos(video_id) ON DELETE CASCADE
   )`,
+  `CREATE TABLE IF NOT EXISTS summary_outputs (
+    video_id TEXT NOT NULL,
+    part_index INTEGER NOT NULL,
+    payload_json TEXT NOT NULL,
+    completed_at TEXT NOT NULL,
+    PRIMARY KEY (video_id, part_index),
+    FOREIGN KEY (video_id) REFERENCES videos(video_id) ON DELETE CASCADE
+  )`,
   `CREATE TABLE IF NOT EXISTS runtime_meta (
     key TEXT PRIMARY KEY,
     value TEXT NOT NULL,
@@ -52,6 +60,7 @@ const STATE_SCHEMA_STATEMENTS = [
   "CREATE INDEX IF NOT EXISTS idx_videos_retry_after ON videos(status, retry_after_at)",
   "CREATE INDEX IF NOT EXISTS idx_transcript_chunks_video ON transcript_chunks(video_id, chunk_index)",
   "CREATE INDEX IF NOT EXISTS idx_summary_inputs_video ON summary_inputs(video_id, part_index)",
+  "CREATE INDEX IF NOT EXISTS idx_summary_outputs_video ON summary_outputs(video_id, part_index)",
 ] as const;
 
 
@@ -338,24 +347,52 @@ export async function markFinalizing(env: Env, videoId: string, workflowId: stri
   return { ...existing, status: "finalizing", finalizationId: workflowId, updatedAt: nowIso };
 }
 
-export async function completeVideo(env: Env, video: VideoRecord, path: string): Promise<void> {
+export async function completeVideo(
+  env: Env,
+  video: VideoRecord,
+  path: string,
+  workflowId?: string,
+): Promise<void> {
   await ensureStateSchema(env);
   const nowIso = new Date().toISOString();
-  await env.QUEUE_DB.prepare(
-    `UPDATE videos SET status='completed', path=?, completed_at=?, failed_at=NULL,
-       retry_after_at=NULL, last_error=NULL, finalization_id=NULL,
-       title=?, youtube_url=?, transcription_model=?, summary_model=?, updated_at=?
-     WHERE video_id=?`,
-  ).bind(
-    path,
-    nowIso,
-    video.title,
-    `https://youtu.be/${video.id}`,
-    env.GROQ_TRANSCRIPTION_MODEL,
-    env.SUMMARY_ENABLED === "true" ? env.GROQ_SUMMARY_MODEL : null,
-    nowIso,
-    video.id,
-  ).run();
+  const statement = workflowId
+    ? env.QUEUE_DB.prepare(
+        `UPDATE videos SET status='completed', path=?, completed_at=?, failed_at=NULL,
+           retry_after_at=NULL, last_error=NULL, finalization_id=NULL,
+           title=?, youtube_url=?, transcription_model=?, summary_model=?, updated_at=?
+         WHERE video_id=? AND status='finalizing' AND finalization_id=?`,
+      ).bind(
+        path,
+        nowIso,
+        video.title,
+        `https://youtu.be/${video.id}`,
+        env.GROQ_TRANSCRIPTION_MODEL,
+        env.SUMMARY_ENABLED === "true" ? env.GROQ_SUMMARY_MODEL : null,
+        nowIso,
+        video.id,
+        workflowId,
+      )
+    : env.QUEUE_DB.prepare(
+        `UPDATE videos SET status='completed', path=?, completed_at=?, failed_at=NULL,
+           retry_after_at=NULL, last_error=NULL, finalization_id=NULL,
+           title=?, youtube_url=?, transcription_model=?, summary_model=?, updated_at=?
+         WHERE video_id=?`,
+      ).bind(
+        path,
+        nowIso,
+        video.title,
+        `https://youtu.be/${video.id}`,
+        env.GROQ_TRANSCRIPTION_MODEL,
+        env.SUMMARY_ENABLED === "true" ? env.GROQ_SUMMARY_MODEL : null,
+        nowIso,
+        video.id,
+      );
+  const result = await statement.run();
+  if (workflowId && Number(result.meta.changes || 0) !== 1) {
+    const current = await getManifestEntry(env, video.id);
+    if (current?.status === "completed" && current.path === path) return;
+    throw new Error(`finalization ${workflowId} no longer owns ${video.id}`);
+  }
 }
 
 export async function failVideo(env: Env, video: VideoRecord, error: unknown): Promise<void> {
@@ -379,9 +416,22 @@ export async function failVideo(env: Env, video: VideoRecord, error: unknown): P
   }
 }
 
-export async function failVideoById(env: Env, videoId: string, error: unknown): Promise<void> {
+export async function failVideoById(
+  env: Env,
+  videoId: string,
+  error: unknown,
+  workflowId?: string,
+): Promise<void> {
   await ensureStateSchema(env);
   const nowIso = new Date().toISOString();
+  if (workflowId) {
+    await env.QUEUE_DB.prepare(
+      `UPDATE videos SET status='failed', failed_at=?, retry_after_at=NULL,
+         last_error=?, finalization_id=NULL, updated_at=?
+       WHERE video_id=? AND status != 'completed' AND finalization_id=?`,
+    ).bind(nowIso, truncate(errorMessage(error), 1200), nowIso, videoId, workflowId).run();
+    return;
+  }
   await env.QUEUE_DB.prepare(
     `UPDATE videos SET status='failed', failed_at=?, retry_after_at=NULL,
        last_error=?, finalization_id=NULL, updated_at=? WHERE video_id=? AND status != 'completed'`,
@@ -392,6 +442,7 @@ export async function resetVideo(env: Env, videoId: string): Promise<boolean> {
   const existing = await getManifestEntry(env, videoId);
   if (!existing) return false;
   await env.QUEUE_DB.batch([
+    env.QUEUE_DB.prepare("DELETE FROM summary_outputs WHERE video_id = ?").bind(videoId),
     env.QUEUE_DB.prepare("DELETE FROM summary_inputs WHERE video_id = ?").bind(videoId),
     env.QUEUE_DB.prepare("DELETE FROM transcript_chunks WHERE video_id = ?").bind(videoId),
     env.QUEUE_DB.prepare("DELETE FROM videos WHERE video_id = ?").bind(videoId),
