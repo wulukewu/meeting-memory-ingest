@@ -165,12 +165,21 @@ async function chatJson<T>(
       },
     ],
   })) as {
-    choices?: Array<{ message?: { content?: string | null } }>;
+    choices?: Array<{
+      finish_reason?: string | null;
+      message?: { content?: string | null };
+    }>;
     response?: string;
   };
 
-  const content = payload.choices?.[0]?.message?.content || payload.response;
+  const choice = payload.choices?.[0];
+  const content = choice?.message?.content || payload.response;
   if (!content) throw new Error(`Workers AI summary model ${model} returned no content`);
+  if (choice?.finish_reason === "length") {
+    throw new Error(
+      `Workers AI summary model ${model} hit the completion token limit (${maxTokens})`,
+    );
+  }
   try {
     return JSON.parse(content) as T;
   } catch (error) {
@@ -266,10 +275,12 @@ export async function combineMeetingSummaries(
       "避免重複；不要創造逐字稿中沒有的決定、分工或姓名。",
       "只有明確承諾、指派或確認的事項才保留在 decisions/actionItems。",
       "category 用簡短 kebab-case；若標題明顯是 campus-agent/資工專題、演算法、MCL，優先使用 campus-agent、algorithm、mcl。",
+      "輸出要精煉：summary 最多約 1200 個中文字；decisions 最多 20 項；actionItems 最多 20 項；topics 最多 60 項；tags 最多 20 項。",
+      "合併重複或高度相似的條目；寧可保留重要資訊，也不要為了逐段覆蓋而重複。",
       "JSON keys 必須是 title, category, summary, decisions, actionItems, topics, tags。",
     ].join("\n"),
     `原始影片標題：${video.title}\n預設分類：${fallbackCategory}\n\n分段摘要：\n${JSON.stringify(partials)}`,
-    2200,
+    6000,
   );
 
   return {
