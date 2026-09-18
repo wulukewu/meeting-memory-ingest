@@ -1,4 +1,4 @@
-name: Recover GIVD finalization
+name: Runtime status check
 
 on:
   push:
@@ -15,16 +15,6 @@ jobs:
       WORKER_ADMIN_TOKEN: ${{ secrets.WORKER_ADMIN_TOKEN }}
       BASE_URL: https://meeting-memory-ingest.ai-memory.workers.dev
     steps:
-      - name: Recover GIVD only
-        shell: bash
-        run: |
-          set -euo pipefail
-          curl -fsS --max-time 60 \
-            -X POST \
-            -H "Authorization: Bearer ${WORKER_ADMIN_TOKEN}" \
-            "${BASE_URL}/admin/recover-finalization/GIVD1Am8zkY"
-          echo
-
       - name: Read watched status
         shell: bash
         run: |
