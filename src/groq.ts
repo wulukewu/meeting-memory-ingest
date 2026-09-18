@@ -152,12 +152,10 @@ async function chatJson<T>(
   user: string,
   maxTokens = 1600,
 ): Promise<T> {
-  const body = {
-    model: env.GROQ_SUMMARY_MODEL || "openai/gpt-oss-120b",
+  const model = env.SUMMARY_MODEL || "@cf/zai-org/glm-4.7-flash";
+  const payload = (await env.AI.run(model, {
     temperature: 0.1,
     max_completion_tokens: maxTokens,
-    reasoning_effort: "low",
-    reasoning_format: "hidden",
     response_format: { type: "json_object" },
     messages: [
       {
@@ -165,22 +163,19 @@ async function chatJson<T>(
         content: `${instructions}\n\n${user}`,
       },
     ],
+  })) as {
+    choices?: Array<{ message?: { content?: string | null } }>;
+    response?: string;
   };
-  // Workflow summary retries must be handled by step.do(), not by sleeping
-  // inside a single Workflow invocation. One API attempt keeps each durable
-  // step short and lets Cloudflare hibernate/retry it safely.
-  const response = await groqFetch(env, "chat/completions", {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify(body),
-  }, 1);
-  const payload = (await response.json()) as { choices?: Array<{ message?: { content?: string } }> };
-  const content = payload.choices?.[0]?.message?.content;
-  if (!content) throw new Error("Groq summary model returned no content");
+
+  const content = payload.choices?.[0]?.message?.content || payload.response;
+  if (!content) throw new Error(`Workers AI summary model ${model} returned no content`);
   try {
     return JSON.parse(content) as T;
   } catch (error) {
-    throw new Error(`Groq summary JSON parse failed: ${errorMessage(error)}; output=${truncate(content, 800)}`);
+    throw new Error(
+      `Workers AI summary JSON parse failed: ${errorMessage(error)}; output=${truncate(content, 800)}`,
+    );
   }
 }
 
