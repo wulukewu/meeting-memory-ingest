@@ -1,4 +1,4 @@
-name: Runtime migration check
+name: Runtime status check
 
 on:
   push:
@@ -10,50 +10,16 @@ permissions:
 jobs:
   verify:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 5
     env:
       WORKER_ADMIN_TOKEN: ${{ secrets.WORKER_ADMIN_TOKEN }}
       BASE_URL: https://meeting-memory-ingest.ai-memory.workers.dev
     steps:
-      - name: Validate admin secret exists
-        shell: bash
-        run: |
-          set -euo pipefail
-          if [[ -z "${WORKER_ADMIN_TOKEN:-}" ]]; then
-            echo "::error::WORKER_ADMIN_TOKEN is missing"
-            exit 1
-          fi
-
-      - name: Run one-shot legacy migration
-        shell: bash
-        run: |
-          set -euo pipefail
-          HTTP_CODE="$(curl -sS --max-time 120 \
-            -o /tmp/migration.json \
-            -w '%{http_code}' \
-            -X POST \
-            -H "Authorization: Bearer ${WORKER_ADMIN_TOKEN}" \
-            "${BASE_URL}/admin/migrate-legacy-state")"
-          cat /tmp/migration.json
-          echo
-          echo "HTTP ${HTTP_CODE}"
-          [[ "${HTTP_CODE}" =~ ^2 ]]
-
-      - name: Run one playlist iteration
-        shell: bash
-        run: |
-          set -euo pipefail
-          curl -fsS --max-time 180 \
-            -X POST \
-            -H "Authorization: Bearer ${WORKER_ADMIN_TOKEN}" \
-            "${BASE_URL}/run?wait=1" | tee /tmp/run.json
-          echo
-
       - name: Read runtime status
         shell: bash
         run: |
           set -euo pipefail
           curl -fsS --max-time 60 \
             -H "Authorization: Bearer ${WORKER_ADMIN_TOKEN}" \
-            "${BASE_URL}/status" | tee /tmp/status.json
+            "${BASE_URL}/status"
           echo
