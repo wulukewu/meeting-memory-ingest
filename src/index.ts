@@ -2,7 +2,7 @@ import type { Env, ScheduledController, WaitUntilContext } from "./types";
 import { handleDashboardRequest } from "./dashboard";
 import { faviconResponse } from "./favicon";
 import { migrateLegacyAiMemoryState } from "./legacy-migration";
-import { getManifestEntry, loadManifest, makeRetryableNow } from "./state";
+import { getManifestEntry, loadManifest, makeRetryableNow, resetVideo } from "./state";
 import {
   handleResolverCallback,
   handleResolverTranscription,
@@ -15,7 +15,7 @@ import { getFinalizationProgress } from "./work-store";
 
 export { FinalizeMeetingWorkflow } from "./finalize-workflow";
 
-const PIPELINE_VERSION = "d1-workers-ai-v1.4+dashboard-v1.1+favicon-v1";
+const PIPELINE_VERSION = "d1-workers-ai-v1.5+dashboard-v1.1+favicon-v1";
 
 function isAdmin(request: Request, env: Env): boolean {
   const auth = request.headers.get("authorization");
@@ -107,6 +107,28 @@ async function handleFetch(request: Request, env: Env, ctx: WaitUntilContext): P
 
   if (request.method === "POST" && url.pathname === "/admin/migrate-legacy-state") {
     return jsonResponse(await migrateLegacyAiMemoryState(env));
+  }
+
+  if (request.method === "POST" && url.pathname.startsWith("/admin/reset-runtime/")) {
+    const videoId = url.pathname.slice("/admin/reset-runtime/".length).trim();
+    if (!/^[A-Za-z0-9_-]{6,20}$/.test(videoId)) {
+      return jsonResponse({ error: "invalid video id" }, 400);
+    }
+
+    const existing = await getManifestEntry(env, videoId);
+    if (!existing) return jsonResponse({ videoId, reset: false, reason: "not tracked" });
+    if (existing.status === "completed" || existing.status === "processing" || existing.status === "finalizing") {
+      return jsonResponse(
+        {
+          error: "runtime reset only applies to inactive failed/waiting entries",
+          videoId,
+          status: existing.status,
+        },
+        409,
+      );
+    }
+
+    return jsonResponse({ videoId, reset: await resetVideo(env, videoId) });
   }
 
   if (request.method === "POST" && url.pathname === "/admin/workers-ai-smoke") {
