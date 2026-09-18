@@ -22,8 +22,45 @@ import {
 import { getVideo, getYouTubeAccessToken } from "./youtube";
 import { parseBoolean } from "./util";
 
+function parseGroqRetryAfterMs(error: Error): number | undefined {
+  const marker = error.message.match(/\[groq-retry-after=(\d+)s\]/i);
+  if (marker) return Math.max(1, Number.parseInt(marker[1], 10)) * 1000;
+
+  const match = error.message.match(
+    /try again in\s+(?:(\d+(?:\.\d+)?)m)?\s*(?:(\d+(?:\.\d+)?)s)?/i,
+  );
+  if (!match) return undefined;
+  const minutes = Number.parseFloat(match[1] || "0");
+  const seconds = Number.parseFloat(match[2] || "0");
+  const totalMs = Math.ceil((minutes * 60 + seconds) * 1000);
+  return totalMs > 0 ? totalMs : undefined;
+}
+
+function deterministicRetryStaggerMs(stepName: string): number {
+  let hash = 0;
+  for (const char of stepName) hash = (hash * 31 + char.charCodeAt(0)) >>> 0;
+  return (hash % 17) * 1000;
+}
+
 const SUMMARY_STEP_OPTIONS = {
-  retries: { limit: 12, delay: "1 minute" as const, backoff: "linear" as const },
+  retries: {
+    limit: 12,
+    delay: ({
+      ctx,
+      error,
+    }: {
+      ctx: { attempt: number; step: { name: string } };
+      error: Error;
+    }) => {
+      const staggerMs = deterministicRetryStaggerMs(ctx.step.name);
+      const providerDelayMs = parseGroqRetryAfterMs(error);
+      if (providerDelayMs) return providerDelayMs + staggerMs;
+
+      // For transient non-rate-limit errors, retry quickly but still avoid
+      // multiple summary steps re-entering on exactly the same second.
+      return Math.min(60, Math.max(10, ctx.attempt * 10)) * 1000 + staggerMs;
+    },
+  },
   timeout: "2 minutes" as const,
 } as const;
 

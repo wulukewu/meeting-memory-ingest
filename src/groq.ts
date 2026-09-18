@@ -16,7 +16,7 @@ export class GroqRateLimitError extends Error {
   readonly retryAfterSeconds: number;
 
   constructor(message: string, retryAfterSeconds: number) {
-    super(message);
+    super(`[groq-retry-after=${Math.max(1, Math.ceil(retryAfterSeconds))}s] ${message}`);
     this.name = "GroqRateLimitError";
     this.retryAfterSeconds = retryAfterSeconds;
   }
