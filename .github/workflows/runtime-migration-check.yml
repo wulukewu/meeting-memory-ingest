@@ -1,4 +1,4 @@
-name: Final combine recovery v1.4
+name: Resume final legacy backlog item
 
 on:
   push:
@@ -8,30 +8,26 @@ permissions:
   contents: read
 
 jobs:
-  recover:
+  resume:
     runs-on: ubuntu-latest
-    timeout-minutes: 6
+    timeout-minutes: 5
     env:
       WORKER_ADMIN_TOKEN: ${{ secrets.WORKER_ADMIN_TOKEN }}
       BASE_URL: https://meeting-memory-ingest.ai-memory.workers.dev
     steps:
-      - name: Restart remaining finalizers
+      - name: Resume Pt4
         shell: bash
         run: |
           set -euo pipefail
-          for VIDEO_ID in GIVD1Am8zkY -oyv8ampS-0 b3jV7HzuR9c fjLxk0sKD5c; do
-            curl -fsS --max-time 60 -X POST \
-              -H "Authorization: Bearer ${WORKER_ADMIN_TOKEN}" \
-              "${BASE_URL}/admin/recover-finalization/${VIDEO_ID}"
-            echo
-          done
-
-      - name: Snapshot after recovery
+          curl -fsS --max-time 90 -X POST \
+            -H "Authorization: Bearer ${WORKER_ADMIN_TOKEN}" \
+            "${BASE_URL}/retry/Pt4YfpZWUbI?wait=1"
+          echo
+      - name: Snapshot
         shell: bash
         run: |
           set -euo pipefail
-          sleep 20
           curl -fsS --max-time 60 \
             -H "Authorization: Bearer ${WORKER_ADMIN_TOKEN}" \
             "${BASE_URL}/status" \
-            | jq '{watched:[.recent[]|select(.videoId=="GIVD1Am8zkY" or .videoId=="-oyv8ampS-0" or .videoId=="b3jV7HzuR9c" or .videoId=="fjLxk0sKD5c")|{videoId,status,completedAt,path,lastError,finalizationProgress,workflowStatus}]}'
+            | jq '{pt4:[.recent[]|select(.videoId=="Pt4YfpZWUbI")|{videoId,status,attempts,retryAfterAt,lastError,completedChunks,totalChunks,nextChunkIndex}]}'
