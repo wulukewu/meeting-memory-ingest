@@ -1,4 +1,4 @@
-import type { Env, Manifest } from "./types";
+import type { Env } from "./types";
 import { base64ToUtf8, truncate, utf8ToBase64 } from "./util";
 
 const API_ROOT = "https://api.github.com";
@@ -58,8 +58,7 @@ export async function getTextFile(env: Env, path: string): Promise<{ text: strin
   }
 
   // GitHub Contents API stops returning inline base64 content for files >1 MiB.
-  // Read the same blob through the Git Data API so one-time legacy migration can
-  // recover large _work files without keeping runtime state in Git afterward.
+  // Fall back to the Git Data API so large durable Markdown remains readable.
   return { text: await readBlobBySha(env, payload.sha), sha: payload.sha };
 }
 
@@ -93,43 +92,7 @@ export async function upsertTextFile(env: Env, path: string, text: string, messa
   await putTextFile(env, path, text, message, current?.sha);
 }
 
-export async function deleteTextFile(env: Env, path: string, message: string): Promise<boolean> {
-  const current = await getTextFile(env, path);
-  if (!current) return false;
-  const response = await githubFetch(env, repoPath(env, path), {
-    method: "DELETE",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({
-      message,
-      sha: current.sha,
-      branch: env.AI_MEMORY_BRANCH,
-      author: AI_MEMORY_AUTOMATION_IDENTITY,
-      committer: AI_MEMORY_AUTOMATION_IDENTITY,
-    }),
-  });
-  if (response.status === 404) return false;
-  if (!response.ok) throw new Error(`GitHub delete ${path} failed (${response.status}): ${truncate(await response.text(), 600)}`);
-  return true;
-}
-
 export async function publishFinalMarkdown(env: Env, path: string, markdown: string, videoId: string): Promise<void> {
   await upsertTextFile(env, path, markdown, `feat(meetings): ingest ${videoId}`);
 }
 
-export function legacyManifestPath(env: Env): string {
-  return `${env.TRANSCRIPT_ROOT.replace(/\/$/, "")}/_manifest.json`;
-}
-
-export function legacyWorkPath(env: Env, videoId: string): string {
-  return `${env.TRANSCRIPT_ROOT.replace(/\/$/, "")}/_work/${videoId}.json`;
-}
-
-export async function loadLegacyManifest(env: Env): Promise<Manifest | null> {
-  const file = await getTextFile(env, legacyManifestPath(env));
-  if (!file) return null;
-  const parsed = JSON.parse(file.text) as Manifest;
-  if (parsed.version !== 1 || !parsed.videos || typeof parsed.videos !== "object") {
-    throw new Error("legacy ai-memory manifest has unsupported shape");
-  }
-  return parsed;
-}

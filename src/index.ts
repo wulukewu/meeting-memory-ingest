@@ -1,7 +1,6 @@
 import type { Env, ScheduledController, WaitUntilContext } from "./types";
 import { handleDashboardRequest } from "./dashboard";
 import { faviconResponse } from "./favicon";
-import { migrateLegacyAiMemoryState } from "./legacy-migration";
 import { getManifestEntry, loadManifest, makeRetryableNow, resetVideo } from "./state";
 import {
   handleResolverCallback,
@@ -15,7 +14,7 @@ import { getFinalizationProgress } from "./work-store";
 
 export { FinalizeMeetingWorkflow } from "./finalize-workflow";
 
-const PIPELINE_VERSION = "d1-workers-ai-v1.5+dashboard-v1.1+favicon-v1";
+const PIPELINE_VERSION = "d1-workers-ai-v1.6+dashboard-v1.1+favicon-v1";
 
 function isAdmin(request: Request, env: Env): boolean {
   const auth = request.headers.get("authorization");
@@ -104,10 +103,6 @@ async function handleFetch(request: Request, env: Env, ctx: WaitUntilContext): P
 
   const notConfigured = configError(env);
   if (notConfigured) return notConfigured;
-
-  if (request.method === "POST" && url.pathname === "/admin/migrate-legacy-state") {
-    return jsonResponse(await migrateLegacyAiMemoryState(env));
-  }
 
   if (request.method === "POST" && url.pathname.startsWith("/admin/reset-runtime/")) {
     const videoId = url.pathname.slice("/admin/reset-runtime/".length).trim();
