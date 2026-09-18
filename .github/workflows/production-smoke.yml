@@ -19,7 +19,7 @@ jobs:
           set -euo pipefail
 
           URL="https://meeting-memory-ingest.ai-memory.workers.dev/health"
-          EXPECTED='"pipelineVersion": "d1-workflows-v1.1+dashboard-v1.1+favicon-v1"'
+          EXPECTED='"pipelineVersion": "d1-workflows-v1.2+dashboard-v1.1+favicon-v1"'
 
           for attempt in $(seq 1 30); do
             echo "Smoke attempt ${attempt}/30"
