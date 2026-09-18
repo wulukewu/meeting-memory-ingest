@@ -1,5 +1,5 @@
 name: Runtime status check
-# v1.4 follow-up 3
+# v1.4 follow-up final
 
 on:
   push:
