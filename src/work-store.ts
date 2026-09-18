@@ -126,6 +126,31 @@ export async function getSummaryOutputs(
   });
 }
 
+export async function getFinalizationProgress(
+  env: Env,
+  videoId: string,
+): Promise<{
+  summaryInputs: number;
+  summaryOutputs: number;
+  lastSummaryAt?: string;
+}> {
+  await ensureStateSchema(env);
+  const [inputs, outputs] = await Promise.all([
+    env.QUEUE_DB.prepare(
+      "SELECT COUNT(*) AS count FROM summary_inputs WHERE video_id = ?",
+    ).bind(videoId).first<{ count: number }>(),
+    env.QUEUE_DB.prepare(
+      "SELECT COUNT(*) AS count, MAX(completed_at) AS last_completed_at FROM summary_outputs WHERE video_id = ?",
+    ).bind(videoId).first<{ count: number; last_completed_at: string | null }>(),
+  ]);
+
+  return {
+    summaryInputs: Number(inputs?.count || 0),
+    summaryOutputs: Number(outputs?.count || 0),
+    ...(outputs?.last_completed_at ? { lastSummaryAt: outputs.last_completed_at } : {}),
+  };
+}
+
 export async function cleanupVideoWork(env: Env, videoId: string): Promise<void> {
   await ensureStateSchema(env);
   await env.QUEUE_DB.batch([

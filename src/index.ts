@@ -11,10 +11,11 @@ import {
   runSingleVideo,
 } from "./pipeline";
 import { jsonResponse } from "./util";
+import { getFinalizationProgress } from "./work-store";
 
 export { FinalizeMeetingWorkflow } from "./finalize-workflow";
 
-const PIPELINE_VERSION = "d1-workflows-v1.4+dashboard-v1.1+favicon-v1";
+const PIPELINE_VERSION = "d1-workflows-v1.5+dashboard-v1.1+favicon-v1";
 
 function isAdmin(request: Request, env: Env): boolean {
   const auth = request.headers.get("authorization");
@@ -80,8 +81,11 @@ async function handleFetch(request: Request, env: Env, ctx: WaitUntilContext): P
       baseEntries.map(async (entry) => {
         if (!entry.finalizationId) return entry;
         try {
-          const instance = await env.FINALIZE_WORKFLOW.get(entry.finalizationId);
-          return { ...entry, workflowStatus: await instance.status() };
+          const [instance, finalizationProgress] = await Promise.all([
+            env.FINALIZE_WORKFLOW.get(entry.finalizationId),
+            getFinalizationProgress(env, entry.videoId),
+          ]);
+          return { ...entry, finalizationProgress, workflowStatus: await instance.status() };
         } catch (error) {
           return {
             ...entry,
