@@ -1,6 +1,6 @@
 # meeting-memory-ingest
 
-把一個 **Private YouTube playlist** 當成 AI Memory Inbox。平常影片保持 `Private`；要處理時手動切成 `Unlisted`。Cloudflare Worker 定期掃描 playlist，只有真正需要 ingest 的影片才 dispatch GitHub Actions。Action 透過 WireGuard 下載 YouTube 音訊並切段，Groq 負責轉錄；Cloudflare D1 / Workflows 保存處理狀態並完成耐久化摘要，最後只把完成的 Markdown 寫進 `wulukewu/ai-memory`。
+把一個 **Private YouTube playlist** 當成 AI Memory Inbox。平常影片保持 `Private`；要處理時手動切成 `Unlisted`。Cloudflare Worker 定期掃描 playlist，只有真正需要 ingest 的影片才 dispatch GitHub Actions。Action 透過 WireGuard 下載 YouTube 音訊並切段，Groq Whisper 負責轉錄；Cloudflare D1 保存 runtime state，Workers AI + Workflows 負責耐久化摘要，最後只把完成的 Markdown 寫進 `wulukewu/ai-memory`。
 
 ## 日常操作
 
@@ -18,7 +18,8 @@
 這個 repo 刻意把「運行狀態」和「長期記憶」分開：
 
 - **D1 / `QUEUE_DB`**：影片 status、attempts、lease、retry time、chunk progress、final path。
-- **R2 / `TRANSCRIPT_WORK`**：暫時的 Whisper chunk JSON、merged transcript、summary inputs。
+- **D1** 也保存暫時的 Whisper chunk JSON、summary inputs 與 summary outputs；完成 publish 後清除。
+- **Workers AI / `AI`**：使用 `@cf/zai-org/glm-4.7-flash` 產生會議摘要。
 - **Cloudflare Workflows / `FINALIZE_WORKFLOW`**：可恢復的多步摘要與 final publish。
 - **GitHub `ai-memory`**：只保存完成後值得長期查閱的 meeting Markdown。
 
@@ -55,15 +56,15 @@ Worker /resolver/transcribe
                 ▼
 Cloudflare Workflow
         │
-        ├─ merge transcript from R2
-        ├─ durable per-part Groq summaries
+        ├─ reconstruct transcript from D1
+        ├─ durable per-part Workers AI summaries
         ├─ combine final summary
         ├─ publish final Markdown to ai-memory
         ├─ D1 → completed
-        └─ cleanup temporary R2 objects
+        └─ cleanup temporary D1 rows
 ```
 
-The finalization Workflow persists successful steps, so a later Groq/API failure does not force the whole meeting to be downloaded or summarized again.
+The finalization Workflow persists successful steps, so a later model/API failure does not force the whole meeting to be downloaded or summarized again.
 
 ## Dashboard
 
@@ -92,7 +93,9 @@ Dashboard states include:
 
 ```jsonc
 {
-  "d1_databases": [{ "binding": "QUEUE_DB" }],  "workflows": [
+  "d1_databases": [{ "binding": "QUEUE_DB" }],
+  "ai": { "binding": "AI" },
+  "workflows": [
     {
       "name": "meeting-memory-finalize",
       "binding": "FINALIZE_WORKFLOW",
@@ -180,9 +183,9 @@ The resolver captures `cf-error-type`, `cf-ray`, and `server` response headers o
 
 ## Rate limits and recovery
 
-If Groq transcription returns `429`, Worker records the API retry window in D1 and returns HTTP 202. Cron does not re-claim the video before that time.
+If Groq Whisper transcription returns `429`, Worker records the API retry window in D1 and returns HTTP 202. Cron does not re-claim the video before that time.
 
-The summary phase runs inside Workflows as separate durable steps. Each completed partial summary is checkpointed by Workflows; retries do not require re-downloading YouTube audio or re-running Whisper.
+The summary phase runs inside Workflows as separate durable steps using Workers AI. Each completed partial summary is checkpointed in D1; retries do not require re-downloading YouTube audio or re-running Whisper.
 
 A lost/stuck resolver `processing` claim expires after 90 minutes. A normal non-rate-limit failure uses a 30-minute retry cooldown.
 
@@ -213,7 +216,7 @@ timestamp_granularities[]=segment
 
 Transcript text is normalized from Simplified Chinese to Taiwan Traditional Chinese while preserving English technical terms, product names, commands, and code identifiers. Segments with `no_speech_prob >= 0.8` are conservatively discarded.
 
-Summary prompts only promote explicit decisions, commitments, or assignments into decisions/action items.
+Summary prompts run on Workers AI (`@cf/zai-org/glm-4.7-flash`) and only promote explicit decisions, commitments, or assignments into decisions/action items.
 
 ## Development
 
@@ -244,7 +247,7 @@ WORKER_ADMIN_TOKEN  # same value as Worker ADMIN_TOKEN
 WG_CONF             # dedicated WireGuard peer, full-tunnel IPv4
 ```
 
-Actions do not receive the Groq key, YouTube OAuth secrets, or `ai-memory` PAT.
+Actions do not receive the Groq key, Workers AI credentials (the Worker uses a native binding), YouTube OAuth secrets, or `ai-memory` PAT.
 
 ## Endpoints
 
