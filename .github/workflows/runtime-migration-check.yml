@@ -28,11 +28,16 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          curl -fsS --max-time 120 \
+          HTTP_CODE="$(curl -sS --max-time 120 \
+            -o /tmp/migration.json \
+            -w '%{http_code}' \
             -X POST \
             -H "Authorization: Bearer ${WORKER_ADMIN_TOKEN}" \
-            "${BASE_URL}/admin/migrate-legacy-state" | tee /tmp/migration.json
+            "${BASE_URL}/admin/migrate-legacy-state")"
+          cat /tmp/migration.json
           echo
+          echo "HTTP ${HTTP_CODE}"
+          [[ "${HTTP_CODE}" =~ ^2 ]]
 
       - name: Run one playlist iteration
         shell: bash
