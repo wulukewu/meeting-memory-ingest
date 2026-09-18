@@ -39,6 +39,15 @@ CREATE TABLE IF NOT EXISTS summary_inputs (
   FOREIGN KEY (video_id) REFERENCES videos(video_id) ON DELETE CASCADE
 );
 
+CREATE TABLE IF NOT EXISTS summary_outputs (
+  video_id TEXT NOT NULL,
+  part_index INTEGER NOT NULL,
+  payload_json TEXT NOT NULL,
+  completed_at TEXT NOT NULL,
+  PRIMARY KEY (video_id, part_index),
+  FOREIGN KEY (video_id) REFERENCES videos(video_id) ON DELETE CASCADE
+);
+
 CREATE TABLE IF NOT EXISTS runtime_meta (
   key TEXT PRIMARY KEY,
   value TEXT NOT NULL,
@@ -49,3 +58,4 @@ CREATE INDEX IF NOT EXISTS idx_videos_status_updated ON videos(status, updated_a
 CREATE INDEX IF NOT EXISTS idx_videos_retry_after ON videos(status, retry_after_at);
 CREATE INDEX IF NOT EXISTS idx_transcript_chunks_video ON transcript_chunks(video_id, chunk_index);
 CREATE INDEX IF NOT EXISTS idx_summary_inputs_video ON summary_inputs(video_id, part_index);
+CREATE INDEX IF NOT EXISTS idx_summary_outputs_video ON summary_outputs(video_id, part_index);
