@@ -261,57 +261,122 @@ export async function summarizeTranscriptChunk(
   return normalizePartial(partial);
 }
 
+function uniqueStrings(values: string[], limit: number): string[] {
+  const seen = new Set<string>();
+  const result: string[] = [];
+  for (const raw of values) {
+    const value = toTaiwanTraditional(raw || "").trim();
+    if (!value) continue;
+    const key = value.replace(/\s+/g, " ").toLocaleLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    result.push(value);
+    if (result.length >= limit) break;
+  }
+  return result;
+}
+
+function uniqueActionItems(
+  values: Array<{ owner?: string; task: string }>,
+  limit: number,
+): Array<{ owner?: string; task: string }> {
+  const seen = new Set<string>();
+  const result: Array<{ owner?: string; task: string }> = [];
+  for (const item of values) {
+    if (!item || typeof item.task !== "string") continue;
+    const owner = typeof item.owner === "string" ? toTaiwanTraditional(item.owner).trim() : undefined;
+    const task = toTaiwanTraditional(item.task).trim();
+    if (!task) continue;
+    const key = `${owner || ""}\u0000${task}`.replace(/\s+/g, " ").toLocaleLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    result.push({ ...(owner ? { owner } : {}), task });
+    if (result.length >= limit) break;
+  }
+  return result;
+}
+
+function uniqueTopics(
+  values: Array<{ timestamp?: string; topic: string }>,
+  limit: number,
+): Array<{ timestamp?: string; topic: string }> {
+  const seen = new Set<string>();
+  const result: Array<{ timestamp?: string; topic: string }> = [];
+  for (const item of values) {
+    if (!item || typeof item.topic !== "string") continue;
+    const timestamp = typeof item.timestamp === "string" ? item.timestamp.trim() : undefined;
+    const topic = toTaiwanTraditional(item.topic).trim();
+    if (!topic) continue;
+    const key = `${timestamp || ""}\u0000${topic}`.replace(/\s+/g, " ").toLocaleLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    result.push({ ...(timestamp ? { timestamp } : {}), topic });
+    if (result.length >= limit) break;
+  }
+  return result;
+}
+
 export async function combineMeetingSummaries(
   env: Env,
   video: VideoRecord,
   partials: PartialSummary[],
 ): Promise<MeetingSummary> {
   const fallbackCategory = inferCategoryFromTitle(video.title);
-  const final = await chatJson<MeetingSummary>(
-    env,
-    [
-      "你在將多段會議摘要合併成可長期查閱的會議索引。只輸出有效 JSON，不要 Markdown。",
-      "請以繁體中文為主；原本就是英文的技術名詞、人名、產品名、程式名稱可保留英文，不要強制翻譯。",
-      "避免重複；不要創造逐字稿中沒有的決定、分工或姓名。",
-      "只有明確承諾、指派或確認的事項才保留在 decisions/actionItems。",
-      "category 用簡短 kebab-case；若標題明顯是 campus-agent/資工專題、演算法、MCL，優先使用 campus-agent、algorithm、mcl。",
-      "輸出要精煉：summary 最多約 1200 個中文字；decisions 最多 20 項；actionItems 最多 20 項；topics 最多 60 項；tags 最多 20 項。",
-      "合併重複或高度相似的條目；寧可保留重要資訊，也不要為了逐段覆蓋而重複。",
-      "JSON keys 必須是 title, category, summary, decisions, actionItems, topics, tags。",
-    ].join("\n"),
-    `原始影片標題：${video.title}\n預設分類：${fallbackCategory}\n\n分段摘要：\n${JSON.stringify(partials)}`,
-    6000,
-  );
+  const partialSummaryText = partials
+    .map((partial, index) => {
+      const summary = typeof partial.summary === "string" ? partial.summary.trim() : "";
+      return summary ? `[Part ${index + 1}] ${summary}` : "";
+    })
+    .filter(Boolean)
+    .join("\n\n");
+
+  let summary = toTaiwanTraditional(
+    partials.map((partial) => partial.summary).filter(Boolean).join("\n\n"),
+  ).trim();
+
+  if (partialSummaryText) {
+    try {
+      const compressed = await chatJson<{ summary?: string }>(
+        env,
+        [
+          "你在把多段會議摘要壓縮成一段可長期查閱的總結。只輸出有效 JSON，不要 Markdown。",
+          "JSON 只能有 summary 這個 key。",
+          "summary 使用繁體中文為主，英文技術名詞、人名、產品名可保留英文。",
+          "summary 最多約 1200 個中文字，聚焦主題、明確決定與真正的下一步。",
+          "不要創造輸入中沒有的事實、姓名、決定或待辦。",
+        ].join("\n"),
+        `影片標題：${video.title}\n\n分段摘要：\n${partialSummaryText}`,
+        1800,
+      );
+      if (typeof compressed.summary === "string" && compressed.summary.trim()) {
+        summary = toTaiwanTraditional(compressed.summary.trim());
+      }
+    } catch (error) {
+      console.error(
+        "Final summary compression failed; publishing deterministic partial-summary fallback",
+        video.id,
+        errorMessage(error),
+      );
+    }
+  }
 
   return {
-    title:
-      typeof final.title === "string" && final.title.trim()
-        ? toTaiwanTraditional(final.title.trim())
-        : toTaiwanTraditional(video.title),
-    category: typeof final.category === "string" && final.category.trim() ? final.category.trim() : fallbackCategory,
-    summary:
-      typeof final.summary === "string"
-        ? toTaiwanTraditional(final.summary.trim())
-        : toTaiwanTraditional(partials.map((x) => x.summary).join("\n\n")),
-    decisions: Array.isArray(final.decisions)
-      ? final.decisions.filter((x): x is string => typeof x === "string").map(toTaiwanTraditional)
-      : [],
-    actionItems: Array.isArray(final.actionItems)
-      ? final.actionItems
-          .filter((x): x is { owner?: string; task: string } => Boolean(x && typeof x.task === "string"))
-          .map((x) => ({
-            owner: typeof x.owner === "string" ? toTaiwanTraditional(x.owner) : undefined,
-            task: toTaiwanTraditional(x.task),
-          }))
-      : [],
-    topics: Array.isArray(final.topics)
-      ? final.topics
-          .filter((x): x is { timestamp?: string; topic: string } => Boolean(x && typeof x.topic === "string"))
-          .map((x) => ({ timestamp: typeof x.timestamp === "string" ? x.timestamp : undefined, topic: toTaiwanTraditional(x.topic) }))
-      : [],
-    tags: Array.isArray(final.tags)
-      ? final.tags.filter((x): x is string => typeof x === "string").map(toTaiwanTraditional)
-      : ["meeting", fallbackCategory],
+    title: toTaiwanTraditional(video.title),
+    category: fallbackCategory,
+    summary,
+    decisions: uniqueStrings(partials.flatMap((partial) => partial.decisions || []), 30),
+    actionItems: uniqueActionItems(
+      partials.flatMap((partial) => partial.actionItems || []),
+      40,
+    ),
+    topics: uniqueTopics(
+      partials.flatMap((partial) => partial.topics || []),
+      80,
+    ),
+    tags: uniqueStrings(
+      ["meeting", fallbackCategory, ...partials.flatMap((partial) => partial.tags || [])],
+      30,
+    ),
   };
 }
 
