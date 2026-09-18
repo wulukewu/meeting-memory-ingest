@@ -32,7 +32,6 @@ function configStatus(env: Env) {
   ];
   const missingBindings = [
     ...(env.QUEUE_DB ? [] : ["QUEUE_DB"]),
-    ...(env.TRANSCRIPT_WORK ? [] : ["TRANSCRIPT_WORK"]),
     ...(env.FINALIZE_WORKFLOW ? [] : ["FINALIZE_WORKFLOW"]),
   ];
   return {
