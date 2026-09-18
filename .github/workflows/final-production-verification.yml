@@ -1,0 +1,25 @@
+name: Final production verification
+
+on:
+  push:
+    branches: [ops/final-verification-2026-09-18]
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    env:
+      WORKER_ADMIN_TOKEN: ${{ secrets.WORKER_ADMIN_TOKEN }}
+      BASE_URL: https://meeting-memory-ingest.ai-memory.workers.dev
+    steps:
+      - name: Read production status
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl -fsS --max-time 60 \
+            -H "Authorization: Bearer ${WORKER_ADMIN_TOKEN}" \
+            "${BASE_URL}/status" \
+            | jq '{pipelineVersion,manifestUpdatedAt,recent:[.recent[]|{videoId,title,status,completedAt,path,lastError,finalizationProgress,workflowStatus}]}'
