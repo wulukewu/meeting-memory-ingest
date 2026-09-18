@@ -19,11 +19,11 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          for attempt in $(seq 1 8); do
-            echo "===== status ${attempt}/8 ====="
+          for attempt in $(seq 1 12); do
+            echo "===== status ${attempt}/12 ====="
             curl -fsS --max-time 60 \
               -H "Authorization: Bearer ${WORKER_ADMIN_TOKEN}" \
               "${BASE_URL}/status" \
               | jq '{pipelineVersion, manifestUpdatedAt, watched: [.recent[] | select(.videoId == "GIVD1Am8zkY" or .videoId == "-oyv8ampS-0" or .videoId == "b3jV7HzuR9c" or .videoId == "5q7XRw5N9jI") | {videoId,status,completedAt,path,lastError,finalizationId,workflowStatus}]}'
-            if (( attempt < 8 )); then sleep 30; fi
+            if (( attempt < 12 )); then sleep 30; fi
           done
