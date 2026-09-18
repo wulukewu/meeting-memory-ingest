@@ -73,6 +73,15 @@ export class FinalizeMeetingWorkflow extends WorkflowEntrypoint<Env, FinalizeWor
   async run(event: WorkflowEvent<FinalizeWorkflowParams>, step: WorkflowStep) {
     const { videoId, workflowId } = event.payload;
 
+    // Workflow instances created before finalization ownership was introduced
+    // do not carry workflowId in their persisted event payload. A legacy
+    // instance may wake after a newer recovery owns the video, so it must
+    // become read-only instead of mutating current D1 state.
+    if (!workflowId) {
+      console.warn("Ignoring legacy finalization instance without workflow ownership", videoId);
+      return { videoId, status: "superseded" };
+    }
+
     try {
       const prepared = await step.do("prepare summary inputs", PUBLISH_STEP_OPTIONS, async () => {
         const entry = await getManifestEntry(this.env, videoId);
