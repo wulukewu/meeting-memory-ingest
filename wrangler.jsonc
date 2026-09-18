@@ -12,11 +12,6 @@
       "binding": "QUEUE_DB"
     }
   ],
-  "r2_buckets": [
-    {
-      "binding": "TRANSCRIPT_WORK"
-    }
-  ],
   "workflows": [
     {
       "name": "meeting-memory-finalize",
