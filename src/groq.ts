@@ -157,6 +157,7 @@ async function chatJson<T>(
     temperature: 0.1,
     max_completion_tokens: maxTokens,
     response_format: { type: "json_object" },
+    chat_template_kwargs: { enable_thinking: false },
     messages: [
       {
         role: "user",
