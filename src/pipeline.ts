@@ -25,24 +25,58 @@ import { getVideo, getYouTubeAccessToken, listPlaylistVideos } from "./youtube";
 import { getStoredChunk, putStoredChunk } from "./work-store";
 import { migrateLegacyAiMemoryState } from "./legacy-migration";
 
-async function dispatchFinalization(env: Env, videoId: string): Promise<string> {
-  const existing = await getManifestEntry(env, videoId);
-  if (!existing) throw new Error(`video ${videoId} has no D1 state`);
-  if (existing.status === "completed") return existing.path || "completed";
-  if (existing.status === "finalizing" && existing.finalizationId) return existing.finalizationId;
-
+async function createFinalizationWorkflow(env: Env, videoId: string): Promise<string> {
   const workflowId = `finalize-${videoId}-${crypto.randomUUID()}`;
   await markFinalizing(env, videoId, workflowId);
   try {
     await env.FINALIZE_WORKFLOW.create({
       id: workflowId,
-      params: { videoId },
+      params: { videoId, workflowId },
     });
     return workflowId;
   } catch (error) {
-    await failVideoById(env, videoId, error);
+    await failVideoById(env, videoId, error, workflowId);
     throw error;
   }
+}
+
+async function dispatchFinalization(env: Env, videoId: string): Promise<string> {
+  const existing = await getManifestEntry(env, videoId);
+  if (!existing) throw new Error(`video ${videoId} has no D1 state`);
+  if (existing.status === "completed") return existing.path || "completed";
+  if (existing.status === "finalizing" && existing.finalizationId) return existing.finalizationId;
+  return createFinalizationWorkflow(env, videoId);
+}
+
+export async function recoverFinalization(
+  env: Env,
+  videoId: string,
+): Promise<{ videoId: string; status: "completed" | "finalizing"; path?: string; workflowId?: string }> {
+  const existing = await getManifestEntry(env, videoId);
+  if (!existing) throw new Error(`video ${videoId} has no D1 state`);
+  if (existing.status === "completed") {
+    return { videoId, status: "completed", path: existing.path };
+  }
+
+  const totalChunks = existing.totalChunks || 1;
+  const completed = normalizedCompletedChunks(totalChunks, existing.completedChunks);
+  if (completed.length !== totalChunks) {
+    throw new Error(
+      `cannot recover finalization for ${videoId}: only ${completed.length}/${totalChunks} transcript chunks are stored`,
+    );
+  }
+
+  if (existing.finalizationId) {
+    try {
+      const instance = await env.FINALIZE_WORKFLOW.get(existing.finalizationId);
+      await instance.terminate();
+    } catch (error) {
+      console.warn("Could not terminate prior finalization instance", videoId, existing.finalizationId, error);
+    }
+  }
+
+  const workflowId = await createFinalizationWorkflow(env, videoId);
+  return { videoId, status: "finalizing", workflowId };
 }
 
 async function dispatchClaimedVideo(env: Env, video: VideoRecord, entry: ManifestEntry): Promise<void> {
