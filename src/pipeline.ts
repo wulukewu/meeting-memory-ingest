@@ -14,6 +14,8 @@ import {
   failVideo,
   failVideoById,
   getManifestEntry,
+  groqTranscriptionCooldownUntil,
+  loadManifest,
   makeRetryableNow,
   markFinalizing,
   recordChunkCompleted,
@@ -101,6 +103,13 @@ function baseResult(trigger: TriggerKind): RunResult {
 
 export async function runPlaylist(env: Env, trigger: TriggerKind = "cron"): Promise<RunResult> {
   const result = baseResult(trigger);
+  const { manifest } = await loadManifest(env);
+  const groqCooldownUntil = groqTranscriptionCooldownUntil(manifest);
+  if (groqCooldownUntil) {
+    console.log(`playlist ingest skipped: Groq transcription cooldown is active until ${groqCooldownUntil}`);
+    return result;
+  }
+
   const accessToken = await getYouTubeAccessToken(env);
   const videos = await listPlaylistVideos(env, accessToken);
   result.scanned = videos.length;
@@ -135,6 +144,13 @@ export async function runPlaylist(env: Env, trigger: TriggerKind = "cron"): Prom
 
 export async function runSingleVideo(env: Env, videoId: string): Promise<RunResult> {
   const result = baseResult("single");
+  const { manifest } = await loadManifest(env);
+  const groqCooldownUntil = groqTranscriptionCooldownUntil(manifest);
+  if (groqCooldownUntil) {
+    result.skipped.push({ videoId, reason: `Groq transcription cooldown is active until ${groqCooldownUntil}` });
+    return result;
+  }
+
   const accessToken = await getYouTubeAccessToken(env);
   const video = await getVideo(env, accessToken, videoId);
   result.scanned = 1;
