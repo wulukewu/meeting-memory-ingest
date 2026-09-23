@@ -3,24 +3,12 @@ name: Resolve and transcribe YouTube audio
 on:
   workflow_dispatch:
     inputs:
-      video_id:
-        description: YouTube video ID to resolve
+      resolver_job_token:
+        description: Opaque resolver job ticket issued by the Worker
         required: true
         type: string
-      callback_url:
-        description: Worker resolver callback endpoint
-        required: true
-        type: string
-      transcription_model:
-        description: Groq transcription model selected by the Worker
-        required: true
-        type: string
-      start_chunk_index:
-        description: First transcript chunk that still needs processing
-        required: true
-        type: string
-      chunk_seconds:
-        description: Duration of each transcription chunk in seconds
+      worker_url:
+        description: Public Worker origin used to resolve the private job payload
         required: true
         type: string
 
@@ -45,31 +33,20 @@ jobs:
 
       - name: Resolve, download, split, and transcribe
         env:
-          VIDEO_ID: ${{ inputs.video_id }}
-          CALLBACK_URL: ${{ inputs.callback_url }}
-          TRANSCRIPTION_MODEL: ${{ inputs.transcription_model }}
-          START_CHUNK_INDEX: ${{ inputs.start_chunk_index }}
-          CHUNK_SECONDS: ${{ inputs.chunk_seconds }}
+          RESOLVER_JOB_TOKEN: ${{ inputs.resolver_job_token }}
+          WORKER_URL: ${{ inputs.worker_url }}
           WORKER_ADMIN_TOKEN: ${{ secrets.WORKER_ADMIN_TOKEN }}
           WG_CONF: ${{ secrets.WG_CONF }}
         shell: bash
         run: |
           set -uo pipefail
 
-          if [[ ! "$VIDEO_ID" =~ ^[A-Za-z0-9_-]{6,20}$ ]]; then
-            echo "Invalid video id" >&2
+          if [[ ! "$RESOLVER_JOB_TOKEN" =~ ^[0-9a-fA-F-]{36}$ ]]; then
+            echo "Invalid resolver job token" >&2
             exit 2
           fi
-          if [[ ! "$TRANSCRIPTION_MODEL" =~ ^[A-Za-z0-9._/-]+$ ]]; then
-            echo "Invalid transcription model" >&2
-            exit 2
-          fi
-          if [[ ! "$START_CHUNK_INDEX" =~ ^[0-9]+$ ]]; then
-            echo "Invalid start chunk index" >&2
-            exit 2
-          fi
-          if [[ ! "$CHUNK_SECONDS" =~ ^[0-9]+$ ]] || (( CHUNK_SECONDS < 300 || CHUNK_SECONDS > 3600 )); then
-            echo "Invalid chunk duration" >&2
+          if [[ ! "$WORKER_URL" =~ ^https:// ]]; then
+            echo "Worker URL must use https" >&2
             exit 2
           fi
           if [[ -z "${WORKER_ADMIN_TOKEN:-}" ]]; then
@@ -80,10 +57,50 @@ jobs:
             echo "WG_CONF secret is not configured" >&2
             exit 2
           fi
-          if [[ ! "$CALLBACK_URL" =~ ^https:// ]]; then
-            echo "Callback URL must use https" >&2
+
+          WORKER_URL="${WORKER_URL%/}"
+          JOB_URL="${WORKER_URL}/resolver/job/${RESOLVER_JOB_TOKEN}"
+          JOB_HTTP_CODE="$(curl -sS --max-time 30 \
+            -D /tmp/resolver-job-headers.txt \
+            -o /tmp/resolver-job.json \
+            -w '%{http_code}' \
+            -X POST \
+            -H "Authorization: Bearer ${WORKER_ADMIN_TOKEN}" \
+            "$JOB_URL")"
+
+          if [[ ! "$JOB_HTTP_CODE" =~ ^2 ]]; then
+            echo "Could not resolve private resolver job metadata (HTTP ${JOB_HTTP_CODE})." >&2
+            grep -iE '^(cf-error-type|cf-ray|server):' /tmp/resolver-job-headers.txt || true
+            exit 1
+          fi
+
+          VIDEO_ID="$(jq -r '.videoId // empty' /tmp/resolver-job.json)"
+          TRANSCRIPTION_MODEL="$(jq -r '.transcriptionModel // empty' /tmp/resolver-job.json)"
+          START_CHUNK_INDEX="$(jq -r '.startChunkIndex // empty' /tmp/resolver-job.json)"
+          CHUNK_SECONDS="$(jq -r '.chunkSeconds // empty' /tmp/resolver-job.json)"
+          CALLBACK_URL="${WORKER_URL}/resolver/callback"
+
+          if [[ ! "$VIDEO_ID" =~ ^[A-Za-z0-9_-]{6,20}$ ]]; then
+            echo "Worker returned an invalid private video id" >&2
             exit 2
           fi
+          echo "::add-mask::$VIDEO_ID"
+
+          if [[ ! "$TRANSCRIPTION_MODEL" =~ ^[A-Za-z0-9._/-]+$ ]]; then
+            echo "Worker returned an invalid transcription model" >&2
+            exit 2
+          fi
+          if [[ ! "$START_CHUNK_INDEX" =~ ^[0-9]+$ ]]; then
+            echo "Worker returned an invalid start chunk index" >&2
+            exit 2
+          fi
+          if [[ ! "$CHUNK_SECONDS" =~ ^[0-9]+$ ]] || (( CHUNK_SECONDS < 300 || CHUNK_SECONDS > 3600 )); then
+            echo "Worker returned an invalid chunk duration" >&2
+            exit 2
+          fi
+
+          rm -f /tmp/resolver-job.json
+          echo "Private resolver job loaded; meeting identifier is masked."
 
           ERR_FILE="$(mktemp)"
           SOURCE_PREFIX="/tmp/meeting-source"
@@ -156,7 +173,7 @@ jobs:
                 --newline \
                 --output "${SOURCE_PREFIX}.%(ext)s" \
                 "https://www.youtube.com/watch?v=${VIDEO_ID}" \
-                2> >(tee "$ERR_FILE" >&2)
+                2> "$ERR_FILE"
               local rc=$?
               set -e
 
@@ -281,9 +298,6 @@ jobs:
                 -F 'temperature=0' \
                 "$TRANSCRIBE_URL")"
 
-              cat /tmp/callback-response.json || true
-              echo
-
               if [[ ! "$HTTP_CODE" =~ ^2 ]]; then
                 echo "Worker chunk transcription failed with HTTP ${HTTP_CODE}" >&2
                 grep -iE '^(cf-error-type|cf-ray|server):' /tmp/callback-headers.txt || true
@@ -291,6 +305,12 @@ jobs:
               fi
 
               FINAL_STATUS="$(jq -r '.status // empty' /tmp/callback-response.json 2>/dev/null || true)"
+              RETRY_AFTER_AT="$(jq -r '.retryAfterAt // empty' /tmp/callback-response.json 2>/dev/null || true)"
+              if [[ -n "$RETRY_AFTER_AT" ]]; then
+                echo "Worker transcription status=${FINAL_STATUS:-unknown}; retry-after=${RETRY_AFTER_AT}."
+              else
+                echo "Worker transcription status=${FINAL_STATUS:-unknown}."
+              fi
               case "$FINAL_STATUS" in
                 chunk_completed)
                   ;;
@@ -334,16 +354,17 @@ jobs:
               -H 'Content-Type: application/json' \
               --data "$PAYLOAD" \
               "$CALLBACK_URL")"
-            cat /tmp/callback-response.json || true
             if [[ ! "$HTTP_CODE" =~ ^2 ]]; then
               echo "Worker callback failed with HTTP ${HTTP_CODE}" >&2
               exit 1
             fi
-            if jq -e '.status == "deferred"' /tmp/callback-response.json >/dev/null 2>&1; then
+            CALLBACK_STATUS="$(jq -r '.status // empty' /tmp/callback-response.json 2>/dev/null || true)"
+            echo "Worker resolver callback status=${CALLBACK_STATUS:-unknown}."
+            if [[ "$CALLBACK_STATUS" == "deferred" ]]; then
               echo "Resolver work deferred after a recoverable YouTube access block."
               exit 0
             fi
-            if jq -e '.status == "failed"' /tmp/callback-response.json >/dev/null 2>&1; then
+            if [[ "$CALLBACK_STATUS" == "failed" ]]; then
               echo "Worker reported resolver failure" >&2
               exit 1
             fi
