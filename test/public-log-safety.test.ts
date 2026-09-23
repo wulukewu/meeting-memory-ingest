@@ -1,3 +1,4 @@
+// @ts-expect-error Test runtime is Node; Worker tsconfig intentionally omits Node builtin types.
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import { isResolverJobToken } from "../src/resolver-job";
