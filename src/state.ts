@@ -3,6 +3,7 @@ import { chunkCount, nextPendingChunk, normalizedCompletedChunks } from "./chunk
 import { errorMessage, parsePositiveInt, truncate } from "./util";
 
 export const YOUTUBE_BOT_BLOCK_MARKER = "[youtube_bot_blocked]";
+export const GROQ_RATE_LIMIT_MARKER = "[groq-retry-after=";
 
 const STATE_SCHEMA_STATEMENTS = [
   `CREATE TABLE IF NOT EXISTS videos (
@@ -178,6 +179,16 @@ export function youtubeResolverCooldownUntil(manifest: Manifest, now = Date.now(
   return latestRetryAt > 0 ? new Date(latestRetryAt).toISOString() : undefined;
 }
 
+export function groqTranscriptionCooldownUntil(manifest: Manifest, now = Date.now()): string | undefined {
+  let latestRetryAt = 0;
+  for (const entry of Object.values(manifest.videos)) {
+    if (entry.status !== "waiting" || !entry.retryAfterAt || !entry.lastError?.includes(GROQ_RATE_LIMIT_MARKER)) continue;
+    const retryAt = Date.parse(entry.retryAfterAt);
+    if (Number.isFinite(retryAt) && retryAt > now && retryAt > latestRetryAt) latestRetryAt = retryAt;
+  }
+  return latestRetryAt > 0 ? new Date(latestRetryAt).toISOString() : undefined;
+}
+
 async function insertNewClaim(env: Env, video: VideoRecord, entry: ManifestEntry, nowIso: string): Promise<boolean> {
   await ensureStateSchema(env);
   const result = await env.QUEUE_DB.prepare(
@@ -213,6 +224,11 @@ export async function claimVideo(env: Env, video: VideoRecord): Promise<ClaimRes
   const resolverCooldownUntil = youtubeResolverCooldownUntil(manifest, now);
   if (resolverCooldownUntil) {
     return { claimed: false, reason: `YouTube resolver cooldown is active until ${resolverCooldownUntil}` };
+  }
+
+  const groqCooldownUntil = groqTranscriptionCooldownUntil(manifest, now);
+  if (groqCooldownUntil) {
+    return { claimed: false, reason: `Groq transcription cooldown is active until ${groqCooldownUntil}` };
   }
 
   const existing = manifest.videos[video.id];
