@@ -11,10 +11,11 @@ import {
 } from "./pipeline";
 import { jsonResponse } from "./util";
 import { getFinalizationProgress } from "./work-store";
+import { getResolverJob, isResolverJobToken } from "./resolver-job";
 
 export { FinalizeMeetingWorkflow } from "./finalize-workflow";
 
-const PIPELINE_VERSION = "d1-workers-ai-v1.6+dashboard-v1.1+favicon-v1";
+const PIPELINE_VERSION = "d1-workers-ai-v1.7+dashboard-v1.1+favicon-v1";
 
 function isAdmin(request: Request, env: Env): boolean {
   const auth = request.headers.get("authorization");
@@ -155,6 +156,14 @@ async function handleFetch(request: Request, env: Env, ctx: WaitUntilContext): P
       return jsonResponse({ error: "invalid video id" }, 400);
     }
     return jsonResponse(await recoverFinalization(env, videoId));
+  }
+
+  if (request.method === "POST" && url.pathname.startsWith("/resolver/job/")) {
+    const token = url.pathname.slice("/resolver/job/".length).trim();
+    if (!isResolverJobToken(token)) return jsonResponse({ error: "invalid resolver job token" }, 400);
+    const job = await getResolverJob(env, token);
+    if (!job) return jsonResponse({ error: "resolver job is expired or no longer active" }, 410);
+    return jsonResponse(job);
   }
 
   if (request.method === "POST" && url.pathname === "/resolver/transcribe") {
