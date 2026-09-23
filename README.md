@@ -40,6 +40,9 @@ Cloudflare Worker
                 ▼
 GitHub Actions resolver
         │
+        ├─ receives only an opaque resolver ticket + public Worker URL
+        ├─ fetches private video metadata from Worker with WORKER_ADMIN_TOKEN
+        ├─ masks the YouTube video ID before running resolver tools
         ├─ WireGuard full-tunnel egress
         ├─ yt-dlp downloads YouTube audio
         ├─ ffmpeg → 16 kHz mono Opus 24 kbps
@@ -150,7 +153,7 @@ transcript chunk: 2700 seconds (45 min)
 preprocessing: 16 kHz mono Opus 24 kbps
 ```
 
-Each resolver run downloads the source once and starts uploading from the first unfinished chunk recorded in D1. Already completed chunks are read from D1 and are not sent to Whisper again.
+Each resolver run receives only an opaque, short-lived job ticket from the Worker. The Action exchanges that ticket for the private video ID and chunk state through the authenticated Worker endpoint, masks the video ID immediately, then downloads the source once and starts uploading from the first unfinished chunk recorded in D1. Already completed chunks are read from D1 and are not sent to Whisper again.
 
 After the last transcript chunk is stored, `/resolver/transcribe` returns `finalizing`; the GitHub Action exits successfully while Cloudflare Workflow continues independently.
 
@@ -233,6 +236,7 @@ GET  /status
 POST /run
 POST /process/<videoId>
 POST /retry/<videoId>
+POST /resolver/job/<opaque-ticket>
 POST /resolver/transcribe
 POST /resolver/callback
 ```
@@ -241,6 +245,10 @@ All non-dashboard administrative/runtime endpoints require the existing bearer `
 
 ## Security notes
 
+- GitHub Actions are treated as a potentially public compute surface: workflow-dispatch inputs contain only an opaque resolver ticket and the public Worker origin, never the YouTube video ID.
+- The Action retrieves private resolver metadata from the Worker using `WORKER_ADMIN_TOKEN`, immediately masks the video ID with GitHub's log masking command, and does not print raw yt-dlp stderr or raw Worker callback JSON.
+- Detailed resolver errors, retry state, meeting titles, transcript chunks, and summaries remain in Cloudflare D1 / Worker-side observability rather than GitHub Actions logs.
+- Before making the repository public, historical Actions logs from the older direct-video-id workflow still need to be deleted separately.
 - YouTube OAuth is readonly.
 - OAuth access tokens are used inside a Workflow step but are **not returned as durable step output**.
 - D1 contains operational metadata; D1 contains both operational metadata and temporary transcript working data.
