@@ -1,3 +1,4 @@
+import { Script } from "node:vm";
 import { describe, expect, it } from "vitest";
 import { renderDashboard } from "../src/dashboard";
 import type { Env, Manifest } from "../src/types";
@@ -17,7 +18,7 @@ describe("dashboard embedded client script", () => {
     const match = html.match(/<script>([\s\S]*?)<\/script>/);
 
     expect(match?.[1]).toBeTruthy();
-    expect(() => new Function(match![1])).not.toThrow();
+    expect(() => new Script(match![1], { filename: "dashboard-client.js" })).not.toThrow();
   });
 
   it("keeps the state-driven motion hooks in the rendered dashboard", () => {
