@@ -15,6 +15,7 @@ import {
   failVideoById,
   getManifestEntry,
   groqTranscriptionCooldownUntil,
+  setRuntimeMeta,
   loadManifest,
   makeRetryableNow,
   markFinalizing,
@@ -103,10 +104,13 @@ function baseResult(trigger: TriggerKind): RunResult {
 
 export async function runPlaylist(env: Env, trigger: TriggerKind = "cron"): Promise<RunResult> {
   const result = baseResult(trigger);
+  const scanStartedAt = new Date().toISOString();
+  await setRuntimeMeta(env, "playlist_last_scan", JSON.stringify({ at: scanStartedAt, trigger, outcome: "started" }));
   const { manifest } = await loadManifest(env);
   const groqCooldownUntil = groqTranscriptionCooldownUntil(manifest);
   if (groqCooldownUntil) {
     console.log(`playlist ingest skipped: Groq transcription cooldown is active until ${groqCooldownUntil}`);
+    await setRuntimeMeta(env, "playlist_last_scan", JSON.stringify({ at: scanStartedAt, trigger, outcome: "cooldown", groqCooldownUntil }));
     return result;
   }
 
@@ -139,6 +143,14 @@ export async function runPlaylist(env: Env, trigger: TriggerKind = "cron"): Prom
     }
   }
 
+  await setRuntimeMeta(env, "playlist_last_scan", JSON.stringify({
+    at: scanStartedAt,
+    trigger,
+    outcome: result.failed.length ? "completed_with_errors" : "completed",
+    scanned: result.scanned,
+    eligible: result.eligible,
+    claimed: result.claimed,
+  }));
   return result;
 }
 
