@@ -394,7 +394,7 @@ function loginPage(message = ""): string {
 
 interface DashboardActivity {
   at: string;
-  label: string;
+  labelKey: DashboardCopyKey;
   detail: string;
   tone: "ok" | "info" | "warn" | "danger";
 }
@@ -408,6 +408,7 @@ interface DashboardView {
     ready: number;
     private: number;
   };
+  manualFailures: number;
   attentionCount: number;
   attentionText: string;
   attentionDetail: string;
@@ -415,6 +416,39 @@ interface DashboardView {
   revision: string;
   activity: DashboardActivity[];
   lastCompletedAt?: string;
+}
+
+function attentionTitle(
+  counts: DashboardView["counts"],
+  manualFailures: number,
+  locale: DashboardLocale = "en",
+): string {
+  if (manualFailures > 0 && counts.action > 0) {
+    return copyText("attention.both", locale, { failures: manualFailures, completed: counts.action });
+  }
+  if (manualFailures > 0) return copyText("attention.failureOnly", locale, { count: manualFailures });
+  if (counts.action > 0) return copyText("attention.actionOnly", locale, { count: counts.action });
+  return copyText("attention.none", locale);
+}
+
+function attentionDescription(
+  counts: DashboardView["counts"],
+  manualFailures: number,
+  locale: DashboardLocale = "en",
+): string {
+  if (manualFailures + counts.action > 0) return copyText("attention.detailIssues", locale);
+  if (counts.active > 0) return copyText("attention.detailActive", locale, { count: counts.active });
+  return copyText("attention.detailClean", locale);
+}
+
+function progressMarkup(entry?: ManifestEntry): string {
+  if (!entry) return "—";
+  if (entry.status === "completed") return i18nText("progress.complete");
+  if (entry.status === "finalizing") return i18nText("progress.finalizing");
+  const total = entry.totalChunks || 1;
+  const done = entry.completedChunks?.length || 0;
+  if (total > 1 || done > 0) return i18nText("progress.chunks", { done, total });
+  return entry.status === "processing" ? i18nText("progress.starting") : "—";
 }
 
 function renderDashboardView(env: Env, rows: DashboardRow[], manifest: Manifest): DashboardView {
@@ -432,11 +466,27 @@ function renderDashboardView(env: Env, rows: DashboardRow[], manifest: Manifest)
     .flatMap((row): DashboardActivity[] => {
       const entry = row.entry;
       if (!entry) return [];
-      if (entry.completedAt) return [{ at: entry.completedAt, label: "處理完成", detail: row.video.title, tone: "ok" }];
-      if (entry.status === "failed" && entry.failedAt) return [{ at: entry.failedAt, label: row.needsManualAction ? "處理失敗" : "等待自動重試", detail: row.video.title, tone: row.needsManualAction ? "danger" : "warn" }];
-      if (entry.status === "waiting" && entry.updatedAt) return [{ at: entry.updatedAt, label: isYouTubeBotBlocked(entry) ? "YouTube 冷卻" : "Groq 冷卻", detail: row.video.title, tone: "warn" }];
-      if (entry.status === "finalizing" && entry.updatedAt) return [{ at: entry.updatedAt, label: "開始整理摘要", detail: row.video.title, tone: "info" }];
-      if (entry.startedAt) return [{ at: entry.startedAt, label: "開始處理", detail: row.video.title, tone: "info" }];
+      if (entry.completedAt) return [{ at: entry.completedAt, labelKey: "activity.completed", detail: row.video.title, tone: "ok" }];
+      if (entry.status === "failed" && entry.failedAt) {
+        return [{
+          at: entry.failedAt,
+          labelKey: row.needsManualAction ? "activity.failed" : "activity.autoRetry",
+          detail: row.video.title,
+          tone: row.needsManualAction ? "danger" : "warn",
+        }];
+      }
+      if (entry.status === "waiting" && entry.updatedAt) {
+        return [{
+          at: entry.updatedAt,
+          labelKey: isYouTubeBotBlocked(entry) ? "activity.youtubeCooldown" : "activity.groqCooldown",
+          detail: row.video.title,
+          tone: "warn",
+        }];
+      }
+      if (entry.status === "finalizing" && entry.updatedAt) {
+        return [{ at: entry.updatedAt, labelKey: "activity.finalizing", detail: row.video.title, tone: "info" }];
+      }
+      if (entry.startedAt) return [{ at: entry.startedAt, labelKey: "activity.started", detail: row.video.title, tone: "info" }];
       return [];
     })
     .sort((a, b) => Date.parse(b.at) - Date.parse(a.at))
@@ -454,58 +504,57 @@ function renderDashboardView(env: Env, rows: DashboardRow[], manifest: Manifest)
     const transcript = entry?.path
       ? `https://github.com/${encodeURIComponent(env.AI_MEMORY_OWNER)}/${encodeURIComponent(env.AI_MEMORY_REPO)}/blob/${encodeURIComponent(env.AI_MEMORY_BRANCH)}/${entry.path.split("/").map(encodeURIComponent).join("/")}`
       : "";
-    const privacyClass = video.privacyStatus.toLowerCase() === "private" ? "muted" : video.privacyStatus.toLowerCase() === "unlisted" ? "warn" : "ok";
-    const error = entry?.lastError ? `<details class="error-details"><summary>錯誤資訊</summary><pre>${escapeHtml(entry.lastError)}</pre></details>` : "";
-    const retry = row.group === "failed"
-      ? `<button class="retry-control" type="button" data-retry-video="${escapeHtml(video.id)}">立即重試</button>`
+    const privacy = video.privacyStatus.toLowerCase();
+    const privacyClass = privacy === "private" ? "muted" : privacy === "unlisted" ? "warn" : "ok";
+    const privacyLabel = privacy ? privacy[0].toUpperCase() + privacy.slice(1) : video.privacyStatus;
+    const error = entry?.lastError
+      ? `<details class="error-details"><summary data-i18n="card.error">${escapeHtml(copyText("card.error"))}</summary><pre>${escapeHtml(entry.lastError)}</pre></details>`
       : "";
-    const retryVerb = isYouTubeBotBlocked(entry) ? "重試" : "續跑";
+    const retry = row.group === "failed"
+      ? `<button class="retry-control" type="button" data-retry-video="${escapeHtml(video.id)}" data-i18n="card.retryNow">${escapeHtml(copyText("card.retryNow"))}</button>`
+      : "";
+    const retryKind = isYouTubeBotBlocked(entry) ? "retry" : "resume";
     const waiting = entry?.retryAfterAt
-      ? `<span class="subtle retry-time" data-retry-at="${escapeHtml(entry.retryAfterAt)}" data-retry-verb="${retryVerb}">${retryVerb} ${escapeHtml(taipeiTime(entry.retryAfterAt))}</span>`
+      ? `<span class="subtle retry-time" data-retry-at="${escapeHtml(entry.retryAfterAt)}" data-retry-kind="${retryKind}"></span>`
       : "";
     const percent = progressPercent(entry);
     const progress = percent !== undefined
-      ? `<div class="progress-row"><div class="progress-track" aria-label="轉錄進度 ${percent}%"><span class="progress-fill" style="width:${percent}%"></span></div><span>${percent}%</span></div>`
+      ? `<div class="progress-row"><div class="progress-track" data-progress-percent="${percent}" aria-label="Transcription progress ${percent}%"><span class="progress-fill" style="width:${percent}%"></span></div><span>${percent}%</span></div>`
       : "";
+    const status = row.statusKey ? i18nText(row.statusKey) : escapeHtml(row.statusLabel);
+    const action = row.actionKey ? i18nText(row.actionKey) : escapeHtml(row.actionHint);
     return `<article class="video-card" data-group="${row.group}" data-search="${escapeHtml(`${video.title} ${video.id}`.toLowerCase())}">
-      <div class="topline"><div class="title-wrap"><h3>${escapeHtml(video.title)}</h3><div class="meta"><span>${escapeHtml(durationLabel(video.durationSeconds))}</span><span class="badge ${privacyClass}">${escapeHtml(video.privacyStatus)}</span></div></div><span class="status status-${row.group}">${escapeHtml(row.statusLabel)}</span></div>
-      <div class="status-grid"><div><span class="label">建議</span><strong>${escapeHtml(row.actionHint)}</strong></div><div><span class="label">進度</span><strong>${escapeHtml(progressLabel(entry))}</strong>${progress}${waiting}</div><div><span class="label">更新</span><strong>${escapeHtml(taipeiTime(rowUpdatedAt(entry)))}</strong></div></div>
+      <div class="topline"><div class="title-wrap"><h3>${escapeHtml(video.title)}</h3><div class="meta"><span>${escapeHtml(durationLabel(video.durationSeconds))}</span><span class="badge ${privacyClass}">${escapeHtml(privacyLabel)}</span></div></div><span class="status status-${row.group}">${status}</span></div>
+      <div class="status-grid"><div><span class="label" data-i18n="card.action">${escapeHtml(copyText("card.action"))}</span><strong>${action}</strong></div><div><span class="label" data-i18n="card.progress">${escapeHtml(copyText("card.progress"))}</span><strong>${progressMarkup(entry)}</strong>${progress}${waiting}</div><div><span class="label" data-i18n="card.updated">${escapeHtml(copyText("card.updated"))}</span><strong>${escapeHtml(taipeiTime(rowUpdatedAt(entry)))}</strong></div></div>
       ${error}
-      <div class="card-footer"><div class="links"><a class="primary" href="${studio}" target="_blank" rel="noreferrer">Studio 編輯</a><a href="${playlist}" target="_blank" rel="noreferrer">Playlist</a><a href="${watch}" target="_blank" rel="noreferrer">YouTube</a>${transcript ? `<a href="${transcript}" target="_blank" rel="noreferrer">Transcript</a>` : ""}${retry}</div><span class="video-id" title="Video ID">${escapeHtml(video.id)}</span></div>
+      <div class="card-footer"><div class="links"><a class="primary" href="${studio}" target="_blank" rel="noreferrer" data-i18n="card.editStudio">${escapeHtml(copyText("card.editStudio"))}</a><a href="${playlist}" target="_blank" rel="noreferrer">Playlist</a><a href="${watch}" target="_blank" rel="noreferrer">YouTube</a>${transcript ? `<a href="${transcript}" target="_blank" rel="noreferrer">Transcript</a>` : ""}${retry}</div><span class="video-id" title="Video ID">${escapeHtml(video.id)}</span></div>
     </article>`;
   };
 
   const section = (
-    id: string,
-    eyebrow: string,
-    title: string,
-    description: string,
+    id: "attention" | "active" | "queue" | "archive",
     groups: DashboardGroup[],
     collapsible = false,
   ): string => {
     const sectionRows = rows.filter((row) => groups.includes(row.group));
     const count = sectionRows.length;
-    const empty = id === "attention"
-      ? '<div class="section-empty">目前沒有需要你處理的項目。</div>'
-      : '<div class="section-empty">目前沒有項目。</div>';
+    const eyebrowKey = `section.${id}.eyebrow` as DashboardCopyKey;
+    const titleKey = `section.${id}.title` as DashboardCopyKey;
+    const descriptionKey = `section.${id}.description` as DashboardCopyKey;
+    const emptyKey: DashboardCopyKey = id === "attention" ? "empty.attention" : "empty.generic";
     return `<section class="flow-section${collapsible ? " collapsible collapsed" : ""}" data-section="${id}" data-groups="${groups.join(",")}">
-      <div class="section-head"><div><div class="eyebrow">${eyebrow}</div><h2>${title}<span class="section-count">${count}</span></h2><p>${description}</p></div>${collapsible ? '<button class="section-toggle" type="button" aria-expanded="false">展開</button>' : ""}</div>
-      <div class="section-body">${sectionRows.map(renderCard).join("") || empty}</div>
+      <div class="section-head"><div><div class="eyebrow" data-i18n="${eyebrowKey}">${escapeHtml(copyText(eyebrowKey))}</div><h2><span data-i18n="${titleKey}">${escapeHtml(copyText(titleKey))}</span><span class="section-count">${count}</span></h2><p data-i18n="${descriptionKey}">${escapeHtml(copyText(descriptionKey))}</p></div>${collapsible ? `<button class="section-toggle" type="button" aria-expanded="false" data-i18n="section.expand">${escapeHtml(copyText("section.expand"))}</button>` : ""}</div>
+      <div class="section-body">${sectionRows.map(renderCard).join("") || `<div class="section-empty" data-i18n="${emptyKey}">${escapeHtml(copyText(emptyKey))}</div>`}</div>
     </section>`;
   };
 
-  const attentionText = attentionCount > 0
-    ? `${manualFailures ? `${manualFailures} 個失敗需要處理` : ""}${manualFailures && counts.action ? " · " : ""}${counts.action ? `${counts.action} 支已完成待收回` : ""}`
-    : "目前沒有需要你介入的項目";
-  const attentionDetail = attentionCount > 0
-    ? "需要處理的項目已排在最前面；等待與自動重試不列入人工介入。"
-    : counts.active > 0 ? `系統正在處理 ${counts.active} 支影片，可以先不用管它。` : "目前流程是乾淨的，沒有異常或待收尾項目。";
-
+  const attentionText = attentionTitle(counts, manualFailures);
+  const attentionDetail = attentionDescription(counts, manualFailures);
   const sectionsHtml = [
-    section("attention", "Needs attention", "需要處理", "只有需要人工確認或收尾的項目會出現在這裡。", ["failed", "action"]),
-    section("active", "In progress", "正在處理", "轉錄、摘要與冷卻等待中的工作。", ["processing", "waiting"]),
-    section("queue", "Queue", "待處理", "已進 Playlist、等待自動 pipeline 接手。", ["ready"]),
-    section("archive", "Archive", "其他影片", "Private 或目前不需要關注的項目，預設收起。", ["private"], true),
+    section("attention", ["failed", "action"]),
+    section("active", ["processing", "waiting"]),
+    section("queue", ["ready"]),
+    section("archive", ["private"], true),
   ].join("");
 
   const revision = [
@@ -522,7 +571,17 @@ function renderDashboardView(env: Env, rows: DashboardRow[], manifest: Manifest)
     ].join(":")),
   ].join("|");
 
-  return { counts, attentionCount, attentionText, attentionDetail, sectionsHtml, revision, activity, lastCompletedAt };
+  return {
+    counts,
+    manualFailures,
+    attentionCount,
+    attentionText,
+    attentionDetail,
+    sectionsHtml,
+    revision,
+    activity,
+    lastCompletedAt,
+  };
 }
 
 async function loadDashboardState(env: Env): Promise<{ rows: DashboardRow[]; manifest: Manifest; lastScan?: { value: string; updatedAt: string } }> {
