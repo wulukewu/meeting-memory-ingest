@@ -167,13 +167,15 @@ export function buildDashboardRow(video: VideoRecord, manifest: Manifest): Dashb
       group: "action",
       statusLabel: "已完成",
       actionHint: privacy === "private" ? "可移出 playlist" : "可改 Private 並移出 playlist",
+      statusKey: "status.completed",
+      actionKey: privacy === "private" ? "action.removePlaylist" : "action.privateAndRemove",
     };
   }
   if (entry?.status === "processing") {
-    return { video, entry, group: "processing", statusLabel: "轉錄中", actionHint: "不用操作" };
+    return { video, entry, group: "processing", statusLabel: "轉錄中", actionHint: "不用操作", statusKey: "status.processing", actionKey: "action.none" };
   }
   if (entry?.status === "finalizing") {
-    return { video, entry, group: "processing", statusLabel: "整理摘要中", actionHint: "Cloudflare Workflow 正在摘要並發布" };
+    return { video, entry, group: "processing", statusLabel: "整理摘要中", actionHint: "Cloudflare Workflow 正在摘要並發布", statusKey: "status.finalizing", actionKey: "action.finalizing" };
   }
   if (entry?.status === "waiting") {
     if (isYouTubeBotBlocked(entry)) {
@@ -183,6 +185,8 @@ export function buildDashboardRow(video: VideoRecord, manifest: Manifest): Dashb
         group: "waiting",
         statusLabel: "YouTube 冷卻中",
         actionHint: "下載出口被 YouTube 暫時阻擋；到時間後自動重試",
+        statusKey: "status.youtubeCooldown",
+        actionKey: "action.youtubeCooldown",
       };
     }
     return {
@@ -191,6 +195,8 @@ export function buildDashboardRow(video: VideoRecord, manifest: Manifest): Dashb
       group: "waiting",
       statusLabel: "等待 Groq 額度",
       actionHint: "額度恢復後自動續跑",
+      statusKey: "status.groqCooldown",
+      actionKey: "action.groqCooldown",
     };
   }
   if (entry?.status === "failed") {
@@ -201,6 +207,8 @@ export function buildDashboardRow(video: VideoRecord, manifest: Manifest): Dashb
         group: "failed",
         statusLabel: "YouTube 阻擋",
         actionHint: "下載出口受阻；系統會依失敗冷卻時間自動再試，也可立即重試",
+        statusKey: "status.youtubeBlocked",
+        actionKey: "action.youtubeBlocked",
         needsManualAction: false,
       };
     }
@@ -210,16 +218,18 @@ export function buildDashboardRow(video: VideoRecord, manifest: Manifest): Dashb
       group: "failed",
       statusLabel: "失敗",
       actionHint: "達失敗冷卻時間後會自動再試；可展開錯誤資訊確認原因，或立即重試",
+      statusKey: "status.failed",
+      actionKey: "action.failed",
       needsManualAction: false,
     };
   }
   if (privacy === "private") {
-    return { video, entry, group: "private", statusLabel: "Private", actionHint: "尚未排入處理" };
+    return { video, entry, group: "private", statusLabel: "Private", actionHint: "尚未排入處理", statusKey: "status.private", actionKey: "action.private" };
   }
   if (privacy === "unlisted") {
-    return { video, entry, group: "ready", statusLabel: "待處理", actionHint: "Cron 會自動處理" };
+    return { video, entry, group: "ready", statusLabel: "待處理", actionHint: "Cron 會自動處理", statusKey: "status.ready", actionKey: "action.ready" };
   }
-  return { video, entry, group: "ready", statusLabel: "未追蹤", actionHint: "目前 pipeline 只自動處理 Unlisted" };
+  return { video, entry, group: "ready", statusLabel: "未追蹤", actionHint: "目前 pipeline 只自動處理 Unlisted", statusKey: "status.untracked", actionKey: "action.untracked" };
 }
 
 function progressLabel(entry?: ManifestEntry): string {
