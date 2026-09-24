@@ -80,6 +80,27 @@ export async function ensureStateSchema(env: Env): Promise<void> {
   await schemaReady;
 }
 
+export async function setRuntimeMeta(env: Env, key: string, value: string): Promise<void> {
+  await ensureStateSchema(env);
+  const nowIso = new Date().toISOString();
+  await env.QUEUE_DB.prepare(
+    `INSERT INTO runtime_meta (key, value, updated_at) VALUES (?, ?, ?)
+     ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at`,
+  ).bind(key, value, nowIso).run();
+}
+
+export async function getRuntimeMeta(
+  env: Env,
+  key: string,
+): Promise<{ value: string; updatedAt: string } | undefined> {
+  await ensureStateSchema(env);
+  const row = await env.QUEUE_DB.prepare(
+    "SELECT value, updated_at FROM runtime_meta WHERE key = ?",
+  ).bind(key).first<{ value: string; updated_at: string }>();
+  if (!row) return undefined;
+  return { value: row.value, updatedAt: row.updated_at };
+}
+
 
 type VideoRow = {
   video_id: string;
