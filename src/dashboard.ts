@@ -14,6 +14,8 @@ export interface DashboardRow {
   group: DashboardGroup;
   statusLabel: string;
   actionHint: string;
+  statusKey?: DashboardCopyKey;
+  actionKey?: DashboardCopyKey;
   needsManualAction?: boolean;
 }
 
@@ -240,6 +242,139 @@ function progressPercent(entry?: ManifestEntry): number | undefined {
 
 function stateRank(group: DashboardGroup): number {
   return { failed: 0, action: 1, processing: 2, waiting: 3, ready: 4, private: 5 }[group];
+}
+
+const DASHBOARD_COPY = {
+  "header.subtitle": { en: "Monitor transcription, summaries, and cleanup · {count} videos visible", zh: "監看轉錄、摘要與收尾狀態 · 目前可見 {count} 支影片" },
+  "header.auto": { en: "Auto-refreshing", zh: "自動更新中" },
+  "header.refreshing": { en: "Refreshing…", zh: "更新中…" },
+  "header.syncing": { en: "Syncing…", zh: "同步中…" },
+  "header.synced": { en: "Synced", zh: "已同步" },
+  "header.syncUnavailable": { en: "Sync unavailable", zh: "暫時無法同步" },
+  "header.offline": { en: "Offline", zh: "網路已離線" },
+  "header.scan": { en: "Scan playlist", zh: "掃描 Playlist" },
+  "header.signOut": { en: "Sign out", zh: "登出" },
+  "header.refreshTitle": { en: "Refresh now", zh: "立即重新整理" },
+  "header.switchLanguage": { en: "Switch to Traditional Chinese", zh: "切換至英文" },
+  "manifest.refresh": { en: "Manifest {time} · 60 sec refresh", zh: "Manifest {time} · 60 秒更新" },
+  "attention.none": { en: "No action needed", zh: "目前沒有需要你介入的項目" },
+  "attention.actionOnly": { en: "{count} completed · cleanup needed", zh: "{count} 支已完成待收回" },
+  "attention.failureOnly": { en: "{count} failure needs attention", zh: "{count} 個失敗需要處理" },
+  "attention.both": { en: "{failures} failures need attention · {completed} completed need cleanup", zh: "{failures} 個失敗需要處理 · {completed} 支已完成待收回" },
+  "attention.detailIssues": { en: "Items needing manual review or cleanup are kept at the top. Automatic waits and retries stay out of this queue.", zh: "需要處理的項目已排在最前面；等待與自動重試不列入人工介入。" },
+  "attention.detailActive": { en: "{count} videos are being handled automatically. No action is needed right now.", zh: "系統正在處理 {count} 支影片，可以先不用管它。" },
+  "attention.detailClean": { en: "Pipeline is clear. No exceptions or cleanup are pending.", zh: "目前流程是乾淨的，沒有異常或待收尾項目。" },
+  "overview.eyebrow": { en: "Overview", zh: "總覽" },
+  "overview.title": { en: "Current status", zh: "目前狀態" },
+  "overview.hint": { en: "Click a count to filter", zh: "點數字即可篩選" },
+  "stat.action": { en: "Completed · cleanup", zh: "已完成，可收回" },
+  "stat.active": { en: "Processing / waiting", zh: "處理中 / 等待" },
+  "stat.failed": { en: "Failed", zh: "失敗" },
+  "stat.ready": { en: "Queued", zh: "待處理" },
+  "stat.private": { en: "Private", zh: "Private" },
+  "stat.all": { en: "Visible", zh: "目前可見" },
+  "search.placeholder": { en: "Search title or video ID", zh: "搜尋標題或 video ID" },
+  "filter.all": { en: "All", zh: "全部" },
+  "filter.action": { en: "Cleanup", zh: "可收回" },
+  "filter.active": { en: "Active", zh: "處理中" },
+  "filter.ready": { en: "Queued", zh: "待處理" },
+  "filter.private": { en: "Private", zh: "Private" },
+  "filter.failed": { en: "Failed", zh: "失敗" },
+  "section.attention.eyebrow": { en: "Needs attention", zh: "需要處理" },
+  "section.attention.title": { en: "Needs attention", zh: "需要處理" },
+  "section.attention.description": { en: "Only items requiring manual review or cleanup appear here.", zh: "只有需要人工確認或收尾的項目會出現在這裡。" },
+  "section.active.eyebrow": { en: "In progress", zh: "正在處理" },
+  "section.active.title": { en: "In progress", zh: "正在處理" },
+  "section.active.description": { en: "Transcription, summarization, and cooldown waits.", zh: "轉錄、摘要與冷卻等待中的工作。" },
+  "section.queue.eyebrow": { en: "Queue", zh: "待處理" },
+  "section.queue.title": { en: "Queue", zh: "待處理" },
+  "section.queue.description": { en: "In the playlist and waiting for the automatic pipeline.", zh: "已進 Playlist、等待自動 pipeline 接手。" },
+  "section.archive.eyebrow": { en: "Archive", zh: "其他影片" },
+  "section.archive.title": { en: "Archive", zh: "其他影片" },
+  "section.archive.description": { en: "Private or low-attention items, collapsed by default.", zh: "Private 或目前不需要關注的項目，預設收起。" },
+  "section.expand": { en: "Expand", zh: "展開" },
+  "section.collapse": { en: "Collapse", zh: "收起" },
+  "empty.attention": { en: "Nothing needs your attention.", zh: "目前沒有需要你處理的項目。" },
+  "empty.generic": { en: "No items.", zh: "目前沒有項目。" },
+  "empty.playlist": { en: "No playlist videos to display.", zh: "目前沒有可顯示的 playlist 影片。" },
+  "card.action": { en: "Action", zh: "建議" },
+  "card.progress": { en: "Progress", zh: "進度" },
+  "card.updated": { en: "Updated", zh: "更新" },
+  "card.error": { en: "Error details", zh: "錯誤資訊" },
+  "card.retryNow": { en: "Retry now", zh: "立即重試" },
+  "card.retrying": { en: "Retrying…", zh: "重試中…" },
+  "card.editStudio": { en: "Edit in Studio", zh: "Studio 編輯" },
+  "status.completed": { en: "Completed", zh: "已完成" },
+  "status.processing": { en: "Transcribing", zh: "轉錄中" },
+  "status.finalizing": { en: "Finalizing", zh: "整理摘要中" },
+  "status.youtubeCooldown": { en: "YouTube cooldown", zh: "YouTube 冷卻中" },
+  "status.groqCooldown": { en: "Waiting for Groq quota", zh: "等待 Groq 額度" },
+  "status.youtubeBlocked": { en: "YouTube blocked", zh: "YouTube 阻擋" },
+  "status.failed": { en: "Failed", zh: "失敗" },
+  "status.private": { en: "Private", zh: "Private" },
+  "status.ready": { en: "Queued", zh: "待處理" },
+  "status.untracked": { en: "Untracked", zh: "未追蹤" },
+  "action.removePlaylist": { en: "Can be removed from the playlist", zh: "可移出 playlist" },
+  "action.privateAndRemove": { en: "Set to Private and remove from the playlist", zh: "可改 Private 並移出 playlist" },
+  "action.none": { en: "No action needed", zh: "不用操作" },
+  "action.finalizing": { en: "Workflow is summarizing and publishing", zh: "Cloudflare Workflow 正在摘要並發布" },
+  "action.youtubeCooldown": { en: "YouTube temporarily blocked the download route; retry is automatic", zh: "下載出口被 YouTube 暫時阻擋；到時間後自動重試" },
+  "action.groqCooldown": { en: "Resumes automatically when quota recovers", zh: "額度恢復後自動續跑" },
+  "action.youtubeBlocked": { en: "Download route blocked; automatic retry is scheduled, or retry now", zh: "下載出口受阻；系統會依失敗冷卻時間自動再試，也可立即重試" },
+  "action.failed": { en: "Automatic retry follows the failure cooldown; inspect the error or retry now", zh: "達失敗冷卻時間後會自動再試；可展開錯誤資訊確認原因，或立即重試" },
+  "action.private": { en: "Not queued", zh: "尚未排入處理" },
+  "action.ready": { en: "Cron will process automatically", zh: "Cron 會自動處理" },
+  "action.untracked": { en: "The pipeline only processes Unlisted videos automatically", zh: "目前 pipeline 只自動處理 Unlisted" },
+  "progress.complete": { en: "Complete", zh: "完成" },
+  "progress.finalizing": { en: "Summary / publish", zh: "摘要 / 發佈" },
+  "progress.starting": { en: "Starting", zh: "啟動中" },
+  "progress.chunks": { en: "{done} / {total} chunks", zh: "{done} / {total} 段" },
+  "retry.retry": { en: "Retry", zh: "重試" },
+  "retry.resume": { en: "Resume", zh: "續跑" },
+  "retry.inMinutes": { en: "{verb} in {minutes} min · {time}", zh: "{minutes} 分鐘後{verb} · {time}" },
+  "retry.inOneMinute": { en: "{verb} in about 1 min · {time}", zh: "約 1 分鐘後{verb} · {time}" },
+  "retry.soon": { en: "{verb} shortly · {time}", zh: "即將{verb} · {time}" },
+  "retry.now": { en: "{verb} due now · {time}", zh: "{verb}時間已到 · {time}" },
+  "ops.lastScan": { en: "Last scan", zh: "上次掃描" },
+  "ops.lastCompleted": { en: "Last completed", zh: "上次完成" },
+  "ops.lastSync": { en: "Last sync", zh: "上次同步" },
+  "ops.justNow": { en: "Just now", zh: "剛剛" },
+  "ops.syncFailed": { en: "Sync failed", zh: "同步失敗" },
+  "activity.eyebrow": { en: "Activity", zh: "動態" },
+  "activity.title": { en: "Recent activity", zh: "最近事件" },
+  "activity.latest": { en: "Latest 8", zh: "最近 8 筆" },
+  "activity.empty": { en: "No recent activity.", zh: "還沒有近期事件。" },
+  "activity.completed": { en: "Completed", zh: "處理完成" },
+  "activity.failed": { en: "Failed", zh: "處理失敗" },
+  "activity.autoRetry": { en: "Waiting for auto-retry", zh: "等待自動重試" },
+  "activity.youtubeCooldown": { en: "YouTube cooldown", zh: "YouTube 冷卻" },
+  "activity.groqCooldown": { en: "Groq cooldown", zh: "Groq 冷卻" },
+  "activity.finalizing": { en: "Finalization started", zh: "開始整理摘要" },
+  "activity.started": { en: "Processing started", zh: "開始處理" },
+  "feedback.retryFailed": { en: "Retry failed: {error}", zh: "重試失敗：{error}" },
+  "feedback.scanning": { en: "Scanning playlist…", zh: "正在掃描 Playlist…" },
+  "feedback.scanComplete": { en: "Scan complete: {eligible} eligible · {claimed} started", zh: "掃描完成：發現 {eligible} 支可處理，觸發 {claimed} 支。" },
+  "feedback.scanFailed": { en: "Scan failed: {error}", zh: "觸發失敗：{error}" },
+} as const;
+
+type DashboardCopyKey = keyof typeof DASHBOARD_COPY;
+type DashboardLocale = keyof (typeof DASHBOARD_COPY)[DashboardCopyKey];
+
+function copyText(
+  key: DashboardCopyKey,
+  locale: DashboardLocale = "en",
+  values: Record<string, string | number> = {},
+): string {
+  let output: string = DASHBOARD_COPY[key][locale];
+  for (const [name, value] of Object.entries(values)) output = output.replaceAll(`{${name}}`, String(value));
+  return output;
+}
+
+function i18nText(key: DashboardCopyKey, values: Record<string, string | number> = {}): string {
+  const dataValues = Object.entries(values)
+    .map(([name, value]) => ` data-i18n-${escapeHtml(name)}="${escapeHtml(value)}"`)
+    .join("");
+  return `<span data-i18n="${key}"${dataValues}>${escapeHtml(copyText(key, "en", values))}</span>`;
 }
 
 function loginPage(message = ""): string {
