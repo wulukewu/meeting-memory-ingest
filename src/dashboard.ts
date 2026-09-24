@@ -628,7 +628,7 @@ function dashboardData(env: Env, rows: DashboardRow[], manifest: Manifest, lastS
   };
 }
 
-function renderDashboard(env: Env, rows: DashboardRow[], manifest: Manifest, lastScan?: { value: string; updatedAt: string }): string {
+export function renderDashboard(env: Env, rows: DashboardRow[], manifest: Manifest, lastScan?: { value: string; updatedAt: string }): string {
   const view = renderDashboardView(env, rows, manifest);
   const { counts, manualFailures, attentionCount, sectionsHtml, activity, lastCompletedAt } = view;
   const scan = parseLastScan(lastScan);
