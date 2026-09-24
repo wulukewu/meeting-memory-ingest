@@ -198,16 +198,17 @@ export function buildDashboardRow(video: VideoRecord, manifest: Manifest): Dashb
         entry,
         group: "failed",
         statusLabel: "YouTube 阻擋",
-        actionHint: "目前下載出口遭 YouTube 阻擋；達重試時間後會自動再試",
+        actionHint: "下載出口受阻；系統會依失敗冷卻時間自動重試，也可立即重試",
+        needsManualAction: false,
       };
     }
     return {
       video,
       entry,
       group: "failed",
-      statusLabel: entry.retryAfterAt ? "等待自動重試" : "需要處理",
-      actionHint: entry.retryAfterAt ? "已排定自動重試，不需要人工介入" : "自動流程已停止；可查看錯誤後手動重試",
-      needsManualAction: !entry.retryAfterAt,
+      statusLabel: "等待自動重試",
+      actionHint: "系統會依失敗冷卻時間自動重試；可查看錯誤或立即重試",
+      needsManualAction: false,
     };
   }
   if (privacy === "private") {
@@ -287,7 +288,7 @@ function renderDashboardView(env: Env, rows: DashboardRow[], manifest: Manifest)
       const entry = row.entry;
       if (!entry) return [];
       if (entry.completedAt) return [{ at: entry.completedAt, label: "處理完成", detail: row.video.title, tone: "ok" }];
-      if (entry.status === "failed" && entry.failedAt) return [{ at: entry.failedAt, label: row.needsManualAction ? "處理失敗" : "等待重試", detail: row.video.title, tone: row.needsManualAction ? "danger" : "warn" }];
+      if (entry.status === "failed" && entry.failedAt) return [{ at: entry.failedAt, label: row.needsManualAction ? "處理失敗" : "等待自動重試", detail: row.video.title, tone: row.needsManualAction ? "danger" : "warn" }];
       if (entry.status === "waiting" && entry.updatedAt) return [{ at: entry.updatedAt, label: isYouTubeBotBlocked(entry) ? "YouTube 冷卻" : "Groq 冷卻", detail: row.video.title, tone: "warn" }];
       if (entry.status === "finalizing" && entry.updatedAt) return [{ at: entry.updatedAt, label: "開始整理摘要", detail: row.video.title, tone: "info" }];
       if (entry.startedAt) return [{ at: entry.startedAt, label: "開始處理", detail: row.video.title, tone: "info" }];
@@ -310,8 +311,8 @@ function renderDashboardView(env: Env, rows: DashboardRow[], manifest: Manifest)
       : "";
     const privacyClass = video.privacyStatus.toLowerCase() === "private" ? "muted" : video.privacyStatus.toLowerCase() === "unlisted" ? "warn" : "ok";
     const error = entry?.lastError ? `<details class="error-details"><summary>錯誤資訊</summary><pre>${escapeHtml(entry.lastError)}</pre></details>` : "";
-    const retry = row.group === "failed" && row.needsManualAction
-      ? `<button class="retry-control" type="button" data-retry-video="${escapeHtml(video.id)}">重新嘗試</button>`
+    const retry = row.group === "failed"
+      ? `<button class="retry-control" type="button" data-retry-video="${escapeHtml(video.id)}">立即重試</button>`
       : "";
     const retryVerb = isYouTubeBotBlocked(entry) ? "重試" : "續跑";
     const waiting = entry?.retryAfterAt
@@ -449,7 +450,7 @@ function renderDashboard(env: Env, rows: DashboardRow[], manifest: Manifest, las
   function updateStaticState(data){lastScan.textContent=formatTaipei(data.lastScan?.at);lastCompleted.textContent=formatTaipei(data.lastCompletedAt);lastSync.textContent='剛剛';activityList.innerHTML=activityMarkup(data.activity);subtitle.textContent='監看轉錄、摘要與收尾狀態 · 目前可見 '+data.counts.all+' 支影片';manifestStatus.textContent='Manifest '+data.manifestUpdatedAt+' · 60 秒更新';attentionStrip.classList.toggle('warn',data.attentionCount>0);attentionIcon.textContent=data.attentionCount>0?'!':'✓';attentionTitle.textContent=data.attentionText;attentionDetail.textContent=data.attentionDetail;statButtons.forEach(button=>{const key=button.dataset.filterTarget;const value=key==='all'?data.counts.all:data.counts[key];const number=button.querySelector('b');if(number&&typeof value==='number')number.textContent=String(value);});}
   async function refreshDashboard(manual=false){if(refreshing)return refreshing;refreshButton.classList.add('spinning');syncPanel.classList.remove('offline','stale');refreshButton.disabled=true;refreshCopy.textContent=manual?'更新中…':'同步中…';refreshing=(async()=>{try{const response=await fetch('/dashboard/data',{headers:{accept:'application/json'},cache:'no-store'});if(response.status===401){location.href='/dashboard';return;}const data=await response.json();if(!response.ok)throw new Error(data.error||('HTTP '+response.status));updateStaticState(data);if(data.revision!==flow.dataset.revision){flow.innerHTML=data.sectionsHtml||'<div class="empty">目前沒有可顯示的 playlist 影片。</div>';flow.dataset.revision=data.revision;refreshDynamicRefs();apply();updateRelativeTimes();}refreshCopy.textContent='已同步';syncPanel.classList.remove('offline','stale');setTimeout(()=>{if(!refreshing)refreshCopy.textContent='自動更新中';},1400);}catch(error){refreshCopy.textContent=navigator.onLine?'暫時無法同步':'網路已離線';syncPanel.classList.add(navigator.onLine?'stale':'offline');lastSync.textContent='同步失敗';console.error('Dashboard refresh failed',error);}finally{refreshButton.classList.remove('spinning');refreshButton.disabled=false;refreshing=null;}})();return refreshing;}
   refreshDynamicRefs();apply();updateRelativeTimes();requestAnimationFrame(()=>{if(Number.isFinite(Number(saved.scrollY)))window.scrollTo(0,Number(saved.scrollY)||0);});
-  filters.forEach(button=>button.addEventListener('click',()=>chooseFilter(button.dataset.filter||'all')));statButtons.forEach(button=>button.addEventListener('click',()=>chooseFilter(button.dataset.filterTarget||'all',true)));search.addEventListener('input',()=>{apply();saveView();});flow.addEventListener('click',async event=>{const retry=event.target.closest?.('[data-retry-video]');if(retry){const videoId=retry.dataset.retryVideo;if(!videoId||retry.disabled)return;retry.disabled=true;retry.textContent='重試中…';try{const response=await fetch('/dashboard/retry/'+encodeURIComponent(videoId),{method:'POST',headers:{'x-dashboard-action':'retry'}});const data=await response.json();if(!response.ok)throw new Error(data.error||('HTTP '+response.status));await refreshDashboard(true);}catch(error){runStatus.classList.add('error');runStatus.textContent='重試失敗：'+(error instanceof Error?error.message:String(error));retry.disabled=false;retry.textContent='重新嘗試';}return;}const toggle=event.target.closest?.('.section-toggle');if(!toggle||!archive?.contains(toggle))return;archiveOpen=archive.classList.contains('collapsed');syncArchive();saveView();});window.addEventListener('pagehide',saveView);
+  filters.forEach(button=>button.addEventListener('click',()=>chooseFilter(button.dataset.filter||'all')));statButtons.forEach(button=>button.addEventListener('click',()=>chooseFilter(button.dataset.filterTarget||'all',true)));search.addEventListener('input',()=>{apply();saveView();});flow.addEventListener('click',async event=>{const retry=event.target.closest?.('[data-retry-video]');if(retry){const videoId=retry.dataset.retryVideo;if(!videoId||retry.disabled)return;retry.disabled=true;retry.textContent='重試中…';try{const response=await fetch('/dashboard/retry/'+encodeURIComponent(videoId),{method:'POST',headers:{'x-dashboard-action':'retry'}});const data=await response.json();if(!response.ok)throw new Error(data.error||('HTTP '+response.status));await refreshDashboard(true);}catch(error){runStatus.classList.add('error');runStatus.textContent='重試失敗：'+(error instanceof Error?error.message:String(error));retry.disabled=false;retry.textContent='立即重試';}return;}const toggle=event.target.closest?.('.section-toggle');if(!toggle||!archive?.contains(toggle))return;archiveOpen=archive.classList.contains('collapsed');syncArchive();saveView();});window.addEventListener('pagehide',saveView);
   refreshButton.addEventListener('click',()=>{void refreshDashboard(true);});setInterval(()=>{if(!document.hidden)void refreshDashboard(false);},60000);document.addEventListener('visibilitychange',()=>{if(!document.hidden)void refreshDashboard(false);});window.addEventListener('online',()=>{void refreshDashboard(false);});window.addEventListener('offline',()=>{refreshCopy.textContent='網路已離線';syncPanel.classList.add('offline');});setInterval(updateRelativeTimes,30000);
   runButton.addEventListener('click',async()=>{runButton.disabled=true;runStatus.classList.remove('error');runStatus.textContent='正在掃描 Playlist…';try{const response=await fetch('/dashboard/run',{method:'POST',headers:{'x-dashboard-action':'run'}});const data=await response.json();if(!response.ok)throw new Error(data.error||('HTTP '+response.status));runStatus.textContent='掃描完成：發現 '+data.eligible+' 支可處理，觸發 '+data.claimed+' 支。';await refreshDashboard(false);}catch(error){runStatus.classList.add('error');runStatus.textContent='觸發失敗：'+(error instanceof Error?error.message:String(error));}finally{runButton.disabled=false;}});
   </script></body></html>`;
