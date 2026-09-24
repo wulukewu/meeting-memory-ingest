@@ -614,6 +614,7 @@ function dashboardData(env: Env, rows: DashboardRow[], manifest: Manifest, lastS
   return {
     revision: view.revision,
     counts: view.counts,
+    manualFailures: view.manualFailures,
     attentionCount: view.attentionCount,
     attentionText: view.attentionText,
     attentionDetail: view.attentionDetail,
