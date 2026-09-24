@@ -365,6 +365,8 @@ const DASHBOARD_COPY = {
   "feedback.scanning": { en: "Scanning playlist…", zh: "正在掃描 Playlist…" },
   "feedback.scanComplete": { en: "Scan complete: {eligible} eligible · {claimed} started", zh: "掃描完成：發現 {eligible} 支可處理，觸發 {claimed} 支。" },
   "feedback.scanFailed": { en: "Scan failed: {error}", zh: "觸發失敗：{error}" },
+  "feedback.scanButtonDone": { en: "Scanned", zh: "已掃描" },
+  "feedback.retryButtonDone": { en: "Retry started", zh: "已開始重試" },
 } as const;
 
 type DashboardCopyKey = keyof typeof DASHBOARD_COPY;
