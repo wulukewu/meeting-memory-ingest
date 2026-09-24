@@ -19,6 +19,7 @@ import {
   makeRetryableNow,
   markFinalizing,
   recordChunkCompleted,
+  setRuntimeMeta,
   YOUTUBE_BOT_BLOCK_MARKER,
 } from "./state";
 import { dispatchYouTubeResolver } from "./resolver-dispatch";
@@ -101,45 +102,91 @@ function baseResult(trigger: TriggerKind): RunResult {
   return { trigger, scanned: 0, eligible: 0, claimed: 0, dispatched: [], completed: [], skipped: [], failed: [] };
 }
 
+async function recordPlaylistRun(
+  env: Env,
+  payload: {
+    trigger: TriggerKind;
+    status: "success" | "failed";
+    startedAt: string;
+    finishedAt: string;
+    result: RunResult;
+    error?: string;
+  },
+): Promise<void> {
+  try {
+    await setRuntimeMeta(env, "last_playlist_run", JSON.stringify(payload));
+  } catch (error) {
+    console.error("Could not record playlist run metadata", error);
+  }
+}
+
 export async function runPlaylist(env: Env, trigger: TriggerKind = "cron"): Promise<RunResult> {
   const result = baseResult(trigger);
-  const { manifest } = await loadManifest(env);
-  const groqCooldownUntil = groqTranscriptionCooldownUntil(manifest);
-  if (groqCooldownUntil) {
-    console.log(`playlist ingest skipped: Groq transcription cooldown is active until ${groqCooldownUntil}`);
+  const startedAt = new Date().toISOString();
+
+  try {
+    const { manifest } = await loadManifest(env);
+    const groqCooldownUntil = groqTranscriptionCooldownUntil(manifest);
+    if (groqCooldownUntil) {
+      console.log(`playlist ingest skipped: Groq transcription cooldown is active until ${groqCooldownUntil}`);
+      await recordPlaylistRun(env, {
+        trigger,
+        status: "success",
+        startedAt,
+        finishedAt: new Date().toISOString(),
+        result,
+      });
+      return result;
+    }
+
+    const accessToken = await getYouTubeAccessToken(env);
+    const videos = await listPlaylistVideos(env, accessToken);
+    result.scanned = videos.length;
+
+    const eligible = videos.filter((video) => video.privacyStatus === "unlisted");
+    result.eligible = eligible.length;
+    const maxItems = parsePositiveInt(env.MAX_ITEMS_PER_RUN, 1);
+
+    for (const video of eligible) {
+      if (result.claimed >= maxItems) {
+        result.skipped.push({ videoId: video.id, reason: "per-run processing limit reached" });
+        continue;
+      }
+
+      const claim = await claimVideo(env, video);
+      if (!claim.entry) {
+        result.skipped.push({ videoId: video.id, reason: claim.reason || "not claimable" });
+        continue;
+      }
+
+      result.claimed += 1;
+      try {
+        await dispatchClaimedVideo(env, video, claim.entry);
+        result.dispatched.push(video.id);
+      } catch (error) {
+        result.failed.push({ videoId: video.id, error: errorMessage(error) });
+      }
+    }
+
+    await recordPlaylistRun(env, {
+      trigger,
+      status: "success",
+      startedAt,
+      finishedAt: new Date().toISOString(),
+      result,
+    });
     return result;
+  } catch (error) {
+    await recordPlaylistRun(env, {
+      trigger,
+      status: "failed",
+      startedAt,
+      finishedAt: new Date().toISOString(),
+      result,
+      error: errorMessage(error),
+    });
+    throw error;
   }
-
-  const accessToken = await getYouTubeAccessToken(env);
-  const videos = await listPlaylistVideos(env, accessToken);
-  result.scanned = videos.length;
-
-  const eligible = videos.filter((video) => video.privacyStatus === "unlisted");
-  result.eligible = eligible.length;
-  const maxItems = parsePositiveInt(env.MAX_ITEMS_PER_RUN, 1);
-
-  for (const video of eligible) {
-    if (result.claimed >= maxItems) {
-      result.skipped.push({ videoId: video.id, reason: "per-run processing limit reached" });
-      continue;
-    }
-
-    const claim = await claimVideo(env, video);
-    if (!claim.entry) {
-      result.skipped.push({ videoId: video.id, reason: claim.reason || "not claimable" });
-      continue;
-    }
-
-    result.claimed += 1;
-    try {
-      await dispatchClaimedVideo(env, video, claim.entry);
-      result.dispatched.push(video.id);
-    } catch (error) {
-      result.failed.push({ videoId: video.id, error: errorMessage(error) });
-    }
-  }
-
-  return result;
 }
 
 export async function runSingleVideo(env: Env, videoId: string): Promise<RunResult> {
