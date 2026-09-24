@@ -198,7 +198,7 @@ export function buildDashboardRow(video: VideoRecord, manifest: Manifest): Dashb
         entry,
         group: "failed",
         statusLabel: "YouTube 阻擋",
-        actionHint: "下載出口受阻；系統會依失敗冷卻時間自動重試，也可立即重試",
+        actionHint: "下載出口受阻；系統會依失敗冷卻時間自動再試，也可立即重試",
         needsManualAction: false,
       };
     }
@@ -206,8 +206,8 @@ export function buildDashboardRow(video: VideoRecord, manifest: Manifest): Dashb
       video,
       entry,
       group: "failed",
-      statusLabel: "等待自動重試",
-      actionHint: "系統會依失敗冷卻時間自動重試；可查看錯誤或立即重試",
+      statusLabel: "失敗",
+      actionHint: "達失敗冷卻時間後會自動再試；可展開錯誤資訊確認原因，或立即重試",
       needsManualAction: false,
     };
   }
