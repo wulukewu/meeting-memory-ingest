@@ -18,7 +18,19 @@ describe("dashboard embedded client script", () => {
     const match = html.match(/<script>([\s\S]*?)<\/script>/);
 
     expect(match?.[1]).toBeTruthy();
-    expect(() => new Script(match![1], { filename: "dashboard-client.js" })).not.toThrow();
+    try {
+      new Script(match![1], { filename: "dashboard-client.js" });
+    } catch (error) {
+      const stack = error instanceof Error ? error.stack || error.message : String(error);
+      console.error(stack);
+      const lineMatch = stack.match(/dashboard-client\.js:(\d+)/);
+      if (lineMatch) {
+        const line = Number(lineMatch[1]);
+        const lines = match![1].split("\n");
+        console.error(lines.slice(Math.max(0, line - 3), line + 2).map((value, index) => `${Math.max(1, line - 2) + index}: ${value}`).join("\n"));
+      }
+      throw error;
+    }
   });
 
   it("keeps the state-driven motion hooks in the rendered dashboard", () => {
