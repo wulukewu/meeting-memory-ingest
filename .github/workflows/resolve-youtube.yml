@@ -59,6 +59,31 @@ jobs:
           fi
 
           WORKER_URL="${WORKER_URL%/}"
+
+          # Best-effort observability registration. The opaque job ticket lets the
+          # Worker bind this public Actions run id to the current private claim
+          # without exposing the meeting id in workflow inputs or logs.
+          if [[ "${GITHUB_RUN_ID:-}" =~ ^[1-9][0-9]{5,20}$ ]]; then
+            RUN_META_PAYLOAD="$(jq -n \
+              --arg resolverJobToken "$RESOLVER_JOB_TOKEN" \
+              --arg runId "$GITHUB_RUN_ID" \
+              '{resolverJobToken:$resolverJobToken,runId:$runId}')"
+            RUN_META_HTTP_CODE="$(curl -sS --max-time 30 \
+              -o /tmp/resolver-run-response.json \
+              -w '%{http_code}' \
+              -X POST \
+              -H "Authorization: Bearer ${WORKER_ADMIN_TOKEN}" \
+              -H 'Content-Type: application/json' \
+              --data "$RUN_META_PAYLOAD" \
+              "${WORKER_URL}/resolver/run" || true)"
+            if [[ ! "$RUN_META_HTTP_CODE" =~ ^2 ]]; then
+              echo "Could not register GitHub Actions run metadata (HTTP ${RUN_META_HTTP_CODE:-network-error}); continuing." >&2
+            fi
+            rm -f /tmp/resolver-run-response.json
+          else
+            echo "GitHub Actions run id is unavailable; continuing without dashboard run link." >&2
+          fi
+
           JOB_URL="${WORKER_URL}/resolver/job/${RESOLVER_JOB_TOKEN}"
           JOB_HTTP_CODE="$(curl -sS --max-time 30 \
             -D /tmp/resolver-job-headers.txt \
