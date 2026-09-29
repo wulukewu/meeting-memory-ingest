@@ -14,11 +14,13 @@ import {
   failVideo,
   failVideoById,
   getManifestEntry,
+  getPlaylistQueueOrder,
   groqTranscriptionCooldownUntil,
   setRuntimeMeta,
   loadManifest,
   makeRetryableNow,
   markFinalizing,
+  orderVideosByQueuePreference,
   recordChunkCompleted,
   YOUTUBE_BOT_BLOCK_MARKER,
 } from "./state";
@@ -118,7 +120,11 @@ export async function runPlaylist(env: Env, trigger: TriggerKind = "cron"): Prom
   const videos = await listPlaylistVideos(env, accessToken);
   result.scanned = videos.length;
 
-  const eligible = videos.filter((video) => video.privacyStatus === "unlisted");
+  const queueOrder = await getPlaylistQueueOrder(env);
+  const eligible = orderVideosByQueuePreference(
+    videos.filter((video) => video.privacyStatus === "unlisted"),
+    queueOrder,
+  );
   result.eligible = eligible.length;
   const maxItems = parsePositiveInt(env.MAX_ITEMS_PER_RUN, 1);
 
