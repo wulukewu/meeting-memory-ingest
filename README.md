@@ -79,6 +79,12 @@ https://meeting-memory-ingest.ai-memory.workers.dev/dashboard
 
 Use the existing `ADMIN_TOKEN` to log in. The Worker exchanges it for a 7-day HttpOnly / Secure / SameSite session cookie.
 
+Dashboard queue controls:
+
+- **Process next** moves an Unlisted pending video to the front of the persisted queue.
+- **Drag to reorder** is available on desktop; the resulting order is stored in D1 `runtime_meta`.
+- Cron and manual playlist scans both honor this order before claiming the next video. Existing processing/finalizing work is never preempted.
+
 Dashboard states include:
 
 - **已完成**：final Markdown exists; video can be made Private / removed from playlist.
@@ -236,6 +242,7 @@ GET  /status
 POST /run
 POST /process/<videoId>
 POST /retry/<videoId>
+POST /dashboard/queue/order
 POST /resolver/job/<opaque-ticket>
 POST /resolver/transcribe
 POST /resolver/callback
