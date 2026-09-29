@@ -134,6 +134,8 @@ export interface ManifestEntry {
   nextChunkIndex?: number;
   completedChunks?: number[];
   finalizationId?: string;
+  resolverRunId?: string;
+  resolverRunUrl?: string;
   updatedAt?: string;
 }
 
