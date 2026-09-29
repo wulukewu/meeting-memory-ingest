@@ -61,11 +61,15 @@ describe("dashboard status mapping", () => {
 
     const html = renderDashboard(env, [row], currentManifest);
     expect(html).toContain('data-queueable="true"');
+    expect(html).toContain('class="queue-priority"');
     expect(html).toContain('data-queue-drag');
     expect(html).toContain('data-process-next="O7TSkeebTNk"');
     expect(html).toContain("Next up");
     expect(html).toContain("Process next");
-    expect(html).toContain("@media(max-width:620px){.queue-tools");
+    expect(html).toContain('class="state-cluster"');
+    expect(html).not.toContain('class="queue-tools"');
+    expect(html.indexOf('class="queue-priority"')).toBeLessThan(html.indexOf('class="status-grid"'));
+    expect(html).toContain("@media(max-width:620px){.state-cluster");
   });
 
   it("shows durable finalization as active without asking for a retry", () => {
