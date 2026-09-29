@@ -143,7 +143,14 @@ export async function getManifestEntry(env: Env, videoId: string): Promise<Manif
     .bind(videoId)
     .first<VideoRow>();
   if (!row) return undefined;
-  return rowToEntry(row, await chunkIndexes(env, videoId));
+  const [completedChunks, runMeta] = await Promise.all([
+    chunkIndexes(env, videoId),
+    env.QUEUE_DB.prepare("SELECT value FROM runtime_meta WHERE key = ?")
+      .bind(resolverRunKey(videoId))
+      .first<{ value: string }>(),
+  ]);
+  const entry = rowToEntry(row, completedChunks);
+  return { ...entry, ...resolverRunFields(entry, runMeta?.value) };
 }
 
 export async function setRuntimeMeta(env: Env, key: string, value: string): Promise<void> {
@@ -161,6 +168,67 @@ export async function getRuntimeMeta(env: Env, key: string): Promise<{ value: st
     "SELECT value, updated_at FROM runtime_meta WHERE key = ?",
   ).bind(key).first<{ value: string; updated_at: string }>();
   return row ? { value: row.value, updatedAt: row.updated_at } : undefined;
+}
+
+const RESOLVER_RUN_PREFIX = "resolver_run:";
+const RESOLVER_RUN_VERSION = 1;
+
+type ResolverRunMetaRow = { key: string; value: string };
+type StoredResolverRunMetadata = {
+  version: typeof RESOLVER_RUN_VERSION;
+  claimStartedAt: string;
+  runId: string;
+  runUrl: string;
+  registeredAt: string;
+};
+
+function resolverRunKey(videoId: string): string {
+  return `${RESOLVER_RUN_PREFIX}${videoId}`;
+}
+
+function resolverRunFields(entry: ManifestEntry, rawValue?: string): Pick<ManifestEntry, "resolverRunId" | "resolverRunUrl"> {
+  if (!entry.startedAt || !rawValue) return {};
+  try {
+    const stored = JSON.parse(rawValue) as StoredResolverRunMetadata;
+    if (
+      stored.version !== RESOLVER_RUN_VERSION ||
+      stored.claimStartedAt !== entry.startedAt ||
+      !/^[1-9][0-9]{5,20}$/.test(stored.runId) ||
+      !/^https:\/\/github\.com\/[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+\/actions\/runs\/[1-9][0-9]{5,20}$/.test(stored.runUrl)
+    ) {
+      return {};
+    }
+    return { resolverRunId: stored.runId, resolverRunUrl: stored.runUrl };
+  } catch {
+    return {};
+  }
+}
+
+export async function setResolverRunMetadata(
+  env: Env,
+  videoId: string,
+  claimStartedAt: string,
+  runId: string,
+  runUrl: string,
+): Promise<void> {
+  await ensureStateSchema(env);
+  const nowIso = new Date().toISOString();
+  const value = JSON.stringify({
+    version: RESOLVER_RUN_VERSION,
+    claimStartedAt,
+    runId,
+    runUrl,
+    registeredAt: nowIso,
+  } satisfies StoredResolverRunMetadata);
+  await env.QUEUE_DB.batch([
+    env.QUEUE_DB.prepare(
+      `INSERT INTO runtime_meta (key, value, updated_at) VALUES (?, ?, ?)
+       ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at`,
+    ).bind(resolverRunKey(videoId), value, nowIso),
+    env.QUEUE_DB.prepare(
+      "UPDATE videos SET updated_at=? WHERE video_id=? AND started_at=? AND status='processing'",
+    ).bind(nowIso, videoId, claimStartedAt),
+  ]);
 }
 
 const PLAYLIST_QUEUE_ORDER_KEY = "playlist_queue_order";
@@ -220,10 +288,12 @@ export function orderVideosByQueuePreference(videos: VideoRecord[], queueOrder: 
 
 export async function loadManifest(env: Env): Promise<{ manifest: Manifest }> {
   await ensureStateSchema(env);
-  const [videoResult, chunkResult] = await Promise.all([
+  const [videoResult, chunkResult, resolverRunResult] = await Promise.all([
     env.QUEUE_DB.prepare("SELECT * FROM videos ORDER BY updated_at DESC").all<VideoRow>(),
     env.QUEUE_DB.prepare("SELECT video_id, chunk_index, completed_at FROM transcript_chunks ORDER BY video_id, chunk_index")
       .all<ChunkRow>(),
+    env.QUEUE_DB.prepare("SELECT key, value FROM runtime_meta WHERE key LIKE 'resolver_run:%'")
+      .all<ResolverRunMetaRow>(),
   ]);
   const byVideo = new Map<string, number[]>();
   for (const chunk of chunkResult.results) {
@@ -232,10 +302,17 @@ export async function loadManifest(env: Env): Promise<{ manifest: Manifest }> {
     byVideo.set(chunk.video_id, list);
   }
 
+  const resolverRuns = new Map<string, string>();
+  for (const meta of resolverRunResult.results) {
+    if (!meta.key.startsWith(RESOLVER_RUN_PREFIX)) continue;
+    resolverRuns.set(meta.key.slice(RESOLVER_RUN_PREFIX.length), meta.value);
+  }
+
   const videos: Record<string, ManifestEntry> = {};
   let updatedAt = new Date(0).toISOString();
   for (const row of videoResult.results) {
-    videos[row.video_id] = rowToEntry(row, byVideo.get(row.video_id) || []);
+    const entry = rowToEntry(row, byVideo.get(row.video_id) || []);
+    videos[row.video_id] = { ...entry, ...resolverRunFields(entry, resolverRuns.get(row.video_id)) };
     if (Date.parse(row.updated_at) > Date.parse(updatedAt)) updatedAt = row.updated_at;
   }
   return { manifest: { version: 1, updatedAt, videos } };
@@ -329,6 +406,8 @@ export async function claimVideo(env: Env, video: VideoRecord): Promise<ClaimRes
     nextChunkIndex,
     completedChunks,
     finalizationId: undefined,
+    resolverRunId: undefined,
+    resolverRunUrl: undefined,
     updatedAt: nowIso,
   };
 
@@ -533,6 +612,7 @@ export async function resetVideo(env: Env, videoId: string): Promise<boolean> {
     env.QUEUE_DB.prepare("DELETE FROM summary_outputs WHERE video_id = ?").bind(videoId),
     env.QUEUE_DB.prepare("DELETE FROM summary_inputs WHERE video_id = ?").bind(videoId),
     env.QUEUE_DB.prepare("DELETE FROM transcript_chunks WHERE video_id = ?").bind(videoId),
+    env.QUEUE_DB.prepare("DELETE FROM runtime_meta WHERE key = ?").bind(resolverRunKey(videoId)),
     env.QUEUE_DB.prepare("DELETE FROM videos WHERE video_id = ?").bind(videoId),
   ]);
   return true;
