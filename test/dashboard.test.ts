@@ -72,6 +72,54 @@ describe("dashboard status mapping", () => {
     expect(html).toContain("@media(max-width:620px){.state-cluster");
   });
 
+  it("renders the current GitHub Actions run as an inline diagnostic link while processing", () => {
+    const currentManifest = manifest("processing");
+    currentManifest.videos.O7TSkeebTNk.resolverRunId = "36522750376";
+    currentManifest.videos.O7TSkeebTNk.resolverRunUrl =
+      "https://github.com/wulukewu/meeting-memory-ingest/actions/runs/36522750376";
+    const row = buildDashboardRow(video("unlisted"), currentManifest);
+    const env = {
+      YOUTUBE_PLAYLIST_ID: "playlist",
+      AI_MEMORY_OWNER: "wulukewu",
+      AI_MEMORY_REPO: "ai-memory",
+      AI_MEMORY_BRANCH: "main",
+    } as Env;
+
+    const html = renderDashboard(env, [row], currentManifest);
+    expect(html).toContain('class="run-link"');
+    expect(html).toContain("https://github.com/wulukewu/meeting-memory-ingest/actions/runs/36522750376");
+    expect(html).toContain("View run");
+  });
+
+  it("shows a failed resolver run but does not mislabel a finalization-stage failure", () => {
+    const env = {
+      YOUTUBE_PLAYLIST_ID: "playlist",
+      AI_MEMORY_OWNER: "wulukewu",
+      AI_MEMORY_REPO: "ai-memory",
+      AI_MEMORY_BRANCH: "main",
+    } as Env;
+    const resolverFailure = manifest("failed");
+    Object.assign(resolverFailure.videos.O7TSkeebTNk, {
+      totalChunks: 2,
+      completedChunks: [],
+      resolverRunId: "36522750376",
+      resolverRunUrl: "https://github.com/wulukewu/meeting-memory-ingest/actions/runs/36522750376",
+    });
+    const resolverHtml = renderDashboard(env, [buildDashboardRow(video("unlisted"), resolverFailure)], resolverFailure);
+    expect(resolverHtml).toContain('class="run-link failed"');
+    expect(resolverHtml).toContain("Failed run");
+
+    const finalizationFailure = manifest("failed");
+    Object.assign(finalizationFailure.videos.O7TSkeebTNk, {
+      totalChunks: 1,
+      completedChunks: [0],
+      resolverRunId: "36522750376",
+      resolverRunUrl: "https://github.com/wulukewu/meeting-memory-ingest/actions/runs/36522750376",
+    });
+    const finalizationHtml = renderDashboard(env, [buildDashboardRow(video("unlisted"), finalizationFailure)], finalizationFailure);
+    expect(finalizationHtml).not.toContain('class="run-link');
+  });
+
   it("shows durable finalization as active without asking for a retry", () => {
     const row = buildDashboardRow(video("unlisted"), manifest("finalizing"));
     expect(row.group).toBe("processing");

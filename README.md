@@ -85,6 +85,12 @@ Dashboard queue controls:
 - **Drag to reorder** is available on desktop; the resulting order is stored in D1 `runtime_meta`.
 - Cron and manual playlist scans both honor this order before claiming the next video. Existing processing/finalizing work is never preempted.
 
+Resolver observability:
+
+- A resolver Action registers its GitHub Actions run ID with the Worker as soon as it starts.
+- The Dashboard shows a compact **View run** link for active/waiting resolver work and **Failed run** for resolver-stage failures.
+- The run link is bound to the current processing claim, so retries do not accidentally show the previous attempt. Finalization-stage failures do not point at an unrelated resolver run.
+
 Dashboard states include:
 
 - **已完成**：final Markdown exists; video can be made Private / removed from playlist.
@@ -244,6 +250,7 @@ POST /process/<videoId>
 POST /retry/<videoId>
 POST /dashboard/queue/order
 POST /resolver/job/<opaque-ticket>
+POST /resolver/run
 POST /resolver/transcribe
 POST /resolver/callback
 ```

@@ -11,11 +11,11 @@ import {
 } from "./pipeline";
 import { jsonResponse } from "./util";
 import { getFinalizationProgress } from "./work-store";
-import { getResolverJob, isResolverJobToken } from "./resolver-job";
+import { getResolverJob, isGitHubRunId, isResolverJobToken, registerResolverRun } from "./resolver-job";
 
 export { FinalizeMeetingWorkflow } from "./finalize-workflow";
 
-const PIPELINE_VERSION = "d1-workers-ai-v1.7+dashboard-v1.3+favicon-v1";
+const PIPELINE_VERSION = "d1-workers-ai-v1.7+dashboard-v1.4+favicon-v1";
 
 function isAdmin(request: Request, env: Env): boolean {
   const auth = request.headers.get("authorization");
@@ -164,6 +164,24 @@ async function handleFetch(request: Request, env: Env, ctx: WaitUntilContext): P
     const job = await getResolverJob(env, token);
     if (!job) return jsonResponse({ error: "resolver job is expired or no longer active" }, 410);
     return jsonResponse(job);
+  }
+
+  if (request.method === "POST" && url.pathname === "/resolver/run") {
+    let payload: { resolverJobToken?: unknown; runId?: unknown };
+    try {
+      payload = (await request.json()) as { resolverJobToken?: unknown; runId?: unknown };
+    } catch {
+      return jsonResponse({ error: "invalid JSON body" }, 400);
+    }
+
+    const token = typeof payload.resolverJobToken === "string" ? payload.resolverJobToken.trim() : "";
+    const runId = typeof payload.runId === "string" ? payload.runId.trim() : "";
+    if (!isResolverJobToken(token)) return jsonResponse({ error: "invalid resolver job token" }, 400);
+    if (!isGitHubRunId(runId)) return jsonResponse({ error: "invalid GitHub Actions run id" }, 400);
+
+    const registered = await registerResolverRun(env, token, runId);
+    if (!registered) return jsonResponse({ error: "resolver job is expired or no longer active" }, 410);
+    return jsonResponse({ registered: true, runId: registered.runId, runUrl: registered.runUrl });
   }
 
   if (request.method === "POST" && url.pathname === "/resolver/transcribe") {

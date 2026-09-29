@@ -1,7 +1,7 @@
 // @ts-expect-error Test runtime is Node; Worker tsconfig intentionally omits Node builtin types.
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
-import { isResolverJobToken } from "../src/resolver-job";
+import { isGitHubRunId, isResolverJobToken, resolverRunUrl } from "../src/resolver-job";
 
 const workflow = readFileSync(
   new URL("../.github/workflows/resolve-youtube.yml", import.meta.url),
@@ -31,6 +31,17 @@ describe("public-safe resolver workflow", () => {
     expect(workflow).not.toContain("cat /tmp/callback-response.json");
     expect(workflow).not.toContain("cat /tmp/resolver-job.json");
   });
+
+  it("registers the public Actions run before resolving private meeting metadata", () => {
+    const registrationStart = workflow.indexOf('RUN_META_PAYLOAD="$(jq -n');
+    const privateJobFetch = workflow.indexOf('JOB_URL="${WORKER_URL}/resolver/job/');
+    expect(registrationStart).toBeGreaterThan(0);
+    expect(privateJobFetch).toBeGreaterThan(registrationStart);
+    const registration = workflow.slice(registrationStart, privateJobFetch);
+    expect(registration).toContain('"${WORKER_URL}/resolver/run"');
+    expect(registration).toContain("$GITHUB_RUN_ID");
+    expect(registration).not.toContain("VIDEO_ID");
+  });
 });
 
 describe("resolver job token validation", () => {
@@ -38,5 +49,16 @@ describe("resolver job token validation", () => {
     expect(isResolverJobToken("123e4567-e89b-42d3-a456-426614174000")).toBe(true);
     expect(isResolverJobToken("u5FQBLKyRsQ")).toBe(false);
     expect(isResolverJobToken("not-a-ticket")).toBe(false);
+  });
+
+  it("validates Actions run ids and constructs the canonical repository run URL", () => {
+    expect(isGitHubRunId("36522750376")).toBe(true);
+    expect(isGitHubRunId("run-36522750376")).toBe(false);
+    expect(
+      resolverRunUrl(
+        { RESOLVER_GITHUB_OWNER: "wulukewu", RESOLVER_GITHUB_REPO: "meeting-memory-ingest" },
+        "36522750376",
+      ),
+    ).toBe("https://github.com/wulukewu/meeting-memory-ingest/actions/runs/36522750376");
   });
 });
