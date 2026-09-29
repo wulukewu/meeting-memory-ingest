@@ -1,5 +1,5 @@
 import type { Env, ManifestEntry } from "./types";
-import { ensureStateSchema, getManifestEntry } from "./state";
+import { ensureStateSchema, getManifestEntry, setResolverRunMetadata } from "./state";
 import { parsePositiveInt } from "./util";
 
 const RESOLVER_JOB_PREFIX = "resolver_job:";
@@ -22,6 +22,36 @@ export type ResolverJob = {
 
 export function isResolverJobToken(value: string): boolean {
   return /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value);
+}
+
+export function isGitHubRunId(value: string): boolean {
+  return /^[1-9][0-9]{5,20}$/.test(value);
+}
+
+export function resolverRunUrl(env: Pick<Env, "RESOLVER_GITHUB_OWNER" | "RESOLVER_GITHUB_REPO">, runId: string): string {
+  if (!isGitHubRunId(runId)) throw new Error("invalid GitHub Actions run id");
+  const owner = env.RESOLVER_GITHUB_OWNER.trim();
+  const repo = env.RESOLVER_GITHUB_REPO.trim();
+  if (!/^[A-Za-z0-9_.-]+$/.test(owner) || !/^[A-Za-z0-9_.-]+$/.test(repo)) {
+    throw new Error("invalid resolver GitHub repository");
+  }
+  return `https://github.com/${owner}/${repo}/actions/runs/${runId}`;
+}
+
+export async function registerResolverRun(
+  env: Env,
+  token: string,
+  runId: string,
+): Promise<{ videoId: string; runId: string; runUrl: string } | undefined> {
+  if (!isResolverJobToken(token) || !isGitHubRunId(runId)) return undefined;
+  const job = await getResolverJob(env, token);
+  if (!job) return undefined;
+  const entry = await getManifestEntry(env, job.videoId);
+  if (!entry?.startedAt || entry.status !== "processing") return undefined;
+
+  const runUrl = resolverRunUrl(env, runId);
+  await setResolverRunMetadata(env, job.videoId, entry.startedAt, runId, runUrl);
+  return { videoId: job.videoId, runId, runUrl };
 }
 
 function resolverJobKey(token: string): string {
