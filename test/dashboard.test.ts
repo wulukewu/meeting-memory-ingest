@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { buildDashboardRow } from "../src/dashboard";
-import type { Manifest, VideoRecord } from "../src/types";
+import { buildDashboardRow, renderDashboard } from "../src/dashboard";
+import type { Env, Manifest, VideoRecord } from "../src/types";
 
 function video(privacyStatus: string): VideoRecord {
   return {
@@ -47,6 +47,25 @@ describe("dashboard status mapping", () => {
   it("shows an untracked private video as not queued", () => {
     const row = buildDashboardRow(video("private"), manifest());
     expect(row.group).toBe("private");
+  });
+
+  it("renders usable queue priority controls for pending unlisted videos", () => {
+    const currentManifest = manifest();
+    const row = buildDashboardRow(video("unlisted"), currentManifest);
+    const env = {
+      YOUTUBE_PLAYLIST_ID: "playlist",
+      AI_MEMORY_OWNER: "wulukewu",
+      AI_MEMORY_REPO: "ai-memory",
+      AI_MEMORY_BRANCH: "main",
+    } as Env;
+
+    const html = renderDashboard(env, [row], currentManifest);
+    expect(html).toContain('data-queueable="true"');
+    expect(html).toContain('data-queue-drag');
+    expect(html).toContain('data-process-next="O7TSkeebTNk"');
+    expect(html).toContain("Next up");
+    expect(html).toContain("Process next");
+    expect(html).toContain("@media(max-width:620px){.queue-tools");
   });
 
   it("shows durable finalization as active without asking for a retry", () => {

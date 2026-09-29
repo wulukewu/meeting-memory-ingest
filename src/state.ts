@@ -163,6 +163,61 @@ export async function getRuntimeMeta(env: Env, key: string): Promise<{ value: st
   return row ? { value: row.value, updatedAt: row.updated_at } : undefined;
 }
 
+const PLAYLIST_QUEUE_ORDER_KEY = "playlist_queue_order";
+const VIDEO_ID_PATTERN = /^[A-Za-z0-9_-]{6,20}$/;
+const MAX_QUEUE_ORDER_ITEMS = 500;
+
+export function normalizePlaylistQueueOrder(value: unknown): string[] {
+  if (!Array.isArray(value)) return [];
+  const seen = new Set<string>();
+  const normalized: string[] = [];
+  for (const raw of value) {
+    if (typeof raw !== "string" || !VIDEO_ID_PATTERN.test(raw) || seen.has(raw)) continue;
+    seen.add(raw);
+    normalized.push(raw);
+    if (normalized.length >= MAX_QUEUE_ORDER_ITEMS) break;
+  }
+  return normalized;
+}
+
+export async function getPlaylistQueueOrder(env: Env): Promise<string[]> {
+  const meta = await getRuntimeMeta(env, PLAYLIST_QUEUE_ORDER_KEY);
+  if (!meta) return [];
+  try {
+    const parsed = JSON.parse(meta.value) as unknown;
+    if (Array.isArray(parsed)) return normalizePlaylistQueueOrder(parsed);
+    if (parsed && typeof parsed === "object" && "videoIds" in parsed) {
+      return normalizePlaylistQueueOrder((parsed as { videoIds?: unknown }).videoIds);
+    }
+  } catch {
+    // Ignore corrupt legacy/runtime metadata and fall back to playlist order.
+  }
+  return [];
+}
+
+export async function setPlaylistQueueOrder(env: Env, videoIds: string[]): Promise<string[]> {
+  const normalized = normalizePlaylistQueueOrder(videoIds);
+  await setRuntimeMeta(
+    env,
+    PLAYLIST_QUEUE_ORDER_KEY,
+    JSON.stringify({ version: 1, videoIds: normalized }),
+  );
+  return normalized;
+}
+
+export function orderVideosByQueuePreference(videos: VideoRecord[], queueOrder: string[]): VideoRecord[] {
+  const rank = new Map(normalizePlaylistQueueOrder(queueOrder).map((videoId, index) => [videoId, index]));
+  return videos
+    .map((video, index) => ({ video, index, rank: rank.get(video.id) }))
+    .sort((a, b) => {
+      if (a.rank !== undefined && b.rank !== undefined) return a.rank - b.rank;
+      if (a.rank !== undefined) return -1;
+      if (b.rank !== undefined) return 1;
+      return a.index - b.index;
+    })
+    .map(({ video }) => video);
+}
+
 export async function loadManifest(env: Env): Promise<{ manifest: Manifest }> {
   await ensureStateSchema(env);
   const [videoResult, chunkResult] = await Promise.all([
